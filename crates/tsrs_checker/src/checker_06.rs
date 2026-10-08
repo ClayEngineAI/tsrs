@@ -2151,6 +2151,25 @@ impl Checker {
                 result_type
             }
             Kind::PlusToken | Kind::PlusEqualsToken => {
+                #[cfg(feature = "clay-vector-trial")]
+                if let Some(symbol) = self.globals.get().get("ClayVector") {
+                    let vector = self.get_declared_type_of_symbol(symbol);
+                    let left_base = self.get_base_constraint_of_type(left_type).unwrap_or(left_type);
+                    let right_base = self.get_base_constraint_of_type(right_type).unwrap_or(right_type);
+                    let excluded = TypeFlags::AnyOrUnknown | TypeFlags::Never;
+                    let left_vector = !left_base.flags().intersects(excluded) && self.is_type_assignable_to(left_base, vector);
+                    let right_vector = !right_base.flags().intersects(excluded) && self.is_type_assignable_to(right_base, vector);
+                    if left_vector || right_vector {
+                        if !left_vector || !right_vector {
+                            self.report_operator_error(left_type, operator, right_type, error_node, None);
+                            return self.error_type;
+                        }
+                        if operator == Kind::PlusEqualsToken {
+                            self.check_assignment_operator(left, operator, right, left_type, vector);
+                        }
+                        return vector;
+                    }
+                }
                 if left_type == self.silent_never_type || right_type == self.silent_never_type {
                     return self.silent_never_type;
                 }
