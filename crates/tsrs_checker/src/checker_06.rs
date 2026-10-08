@@ -2151,7 +2151,7 @@ impl Checker {
                 result_type
             }
             Kind::PlusToken | Kind::PlusEqualsToken => {
-                #[cfg(feature = "clay-vector-trial")]
+                #[cfg(feature = "clay-vector-operators")]
                 if let Some(symbol) = self.globals.get().get("ClayVector") {
                     let vector = self.get_declared_type_of_symbol(symbol);
                     let left_base = self.get_base_constraint_of_type(left_type).unwrap_or(left_type);
