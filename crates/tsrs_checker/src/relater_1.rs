@@ -1367,6 +1367,14 @@ impl Checker {
         self.get_unmatched_properties_worker(source, target, require_optional_properties, match_discriminant_properties, None)
     }
 
+    /// `get_unmatched_property(source, target, require_optional_properties, false)` that also records, for each
+    /// property of `get_properties_of_type(target)` by position, the source property it looked up (`Some(found)`)
+    /// or `None` where it looked nothing up. Nothing is recorded when it walks a lazy member table's declared members
+    /// instead (`found` is then left empty), or past an unmatched property.
+    pub(crate) fn get_unmatched_property_recording(&mut self, source: P<Type>, target: P<Type>, require_optional_properties: bool, found: &mut Vec<Option<Option<P<Symbol>>>>) -> Option<P<Symbol>> {
+        self.get_unmatched_properties_worker_ex(source, target, require_optional_properties, false, None, Some(found))
+    }
+
     // relater.go:971
     pub(crate) fn get_unmatched_properties(&mut self, source: P<Type>, target: P<Type>, require_optional_properties: bool, match_discriminant_properties: bool) -> Vec<P<Symbol>> {
         let mut props: Vec<P<Symbol>> = Vec::new();
@@ -1376,6 +1384,10 @@ impl Checker {
 
     // relater.go:977
     pub(crate) fn get_unmatched_properties_worker(&mut self, source: P<Type>, target: P<Type>, require_optional_properties: bool, match_discriminant_properties: bool, props_out: Option<&mut Vec<P<Symbol>>>) -> Option<P<Symbol>> {
+        self.get_unmatched_properties_worker_ex(source, target, require_optional_properties, match_discriminant_properties, props_out, None)
+    }
+
+    fn get_unmatched_properties_worker_ex(&mut self, source: P<Type>, target: P<Type>, require_optional_properties: bool, match_discriminant_properties: bool, props_out: Option<&mut Vec<P<Symbol>>>, found: Option<&mut Vec<Option<Option<P<Symbol>>>>>) -> Option<P<Symbol>> {
         let mut props_out = props_out;
         let lazy_properties = if self.lazy_unmatched { self.get_lazy_properties_in_order(target) } else { None };
         let lazy = lazy_properties.is_some();
@@ -1383,9 +1395,14 @@ impl Checker {
             Some(properties) => properties.into(),
             None => self.get_properties_of_type(target).into(),
         };
+        // Only full lookups are worth recording (has_property_of_type does not instantiate).
+        let mut found = found.filter(|_| !lazy && !self.lazy_has_prop);
         for &target_prop in properties.iter() {
             // TODO: remove this when we support static private identifier fields and find other solutions to get privateNamesAndStaticFields test to pass
             if is_static_private_identifier_property(target_prop) {
+                if let Some(found) = found.as_deref_mut() {
+                    found.push(None);
+                }
                 continue;
             }
             if require_optional_properties
@@ -1398,6 +1415,9 @@ impl Checker {
                 } else {
                     self.get_property_of_type(source, target_prop.name())
                 };
+                if let Some(found) = found.as_deref_mut() {
+                    found.push(Some(source_prop));
+                }
                 // notes/mem-lazy.md L10: a declared member stands in for the target property until the property
                 // itself is returned or its type is needed.
                 let mut target_prop = target_prop;
@@ -1433,6 +1453,8 @@ impl Checker {
                         }
                     }
                 }
+            } else if let Some(found) = found.as_deref_mut() {
+                found.push(None);
             }
         }
         None
@@ -1751,9 +1773,13 @@ impl Checker {
             // refine the target set without eliminating every constituent (which would lead to `never`).
             let mut matched = false;
             let name = discriminator.name(self, n);
+            let known = self.discriminant_property_types(target, types, name);
             for i in 0..types.len() {
                 if include[i] != Ternary::False {
-                    let target_type = self.get_type_of_property_or_index_signature_of_type(types[i], name);
+                    let target_type = match known.as_ref().and_then(|known| known[i]) {
+                        Some(target_type) => target_type,
+                        None => self.get_type_of_property_or_index_signature_of_type(types[i], name),
+                    };
                     if let Some(target_type) = target_type {
                         if discriminator.matches(self, n, target_type) {
                             matched = true;
@@ -1787,6 +1813,50 @@ impl Checker {
             }
         }
         target
+    }
+
+    /// tsrs-only: for a union of eight or more constituents, by constituent, what
+    /// `get_type_of_property_or_index_signature_of_type(constituent, name)` returns when that is known for good and
+    /// asking has no side effects (None where it must be asked). Discriminating a contextual union asks it for each
+    /// discriminant of each object literal, and object literals share their contextual unions. Known: a plain object
+    /// type with resolved members whose member `name` is a value symbol with its type resolved, or one with no such
+    /// member, no index infos and a name that no `Object` or `Function` member has. Computed only with no member
+    /// resolution in progress; dropped when any type's members are reset.
+    fn discriminant_property_types(&mut self, target: P<Type>, types: &[P<Type>], name: &str) -> Option<std::rc::Rc<[Option<Option<P<Type>>>]>> {
+        if types.len() < 8 {
+            return None;
+        }
+        let key = HashedName::new(name);
+        let epoch = self.members_reset_epoch;
+        if let Some(e) = self.discriminant_property_types.get(&(target, key.hash())).and_then(|entries| entries.iter().find(|e| e.0 == name))
+            && e.1 == epoch
+        {
+            return Some(std::rc::Rc::clone(&e.2));
+        }
+        if self.members_resolving != 0 {
+            return None;
+        }
+        let known: std::rc::Rc<[Option<Option<P<Type>>>]> = types.iter().map(|&t| self.known_property_or_index_type(t, key)).collect();
+        let entries = self.discriminant_property_types.entry((target, key.hash())).or_default();
+        entries.retain(|e| e.0 != name);
+        entries.push((alloc_str(name), epoch, std::rc::Rc::clone(&known)));
+        Some(known)
+    }
+
+    /// See `discriminant_property_types`.
+    fn known_property_or_index_type(&mut self, t: P<Type>, key: HashedName<'_>) -> Option<Option<P<Type>>> {
+        if t.flags() != TypeFlags::Object
+            || t.object_flags_lazy() & (ObjectFlags::MembersResolved | ObjectFlags::Mapped) != ObjectFlags::MembersResolved
+            || is_tuple_type(t)
+            || t.symbol().is_some_and(|s| s.flags().intersects(SymbolFlags::ValueModule))
+        {
+            return None;
+        }
+        match t.as_structured_type().members().and_then(|m| m.lookup_hashed(key)) {
+            Some(prop) if prop.flags().intersects(SymbolFlags::Value) => self.cached_type_of_value_symbol(prop).map(Some),
+            Some(_) => None,
+            None => (self.index_infos_of_structured_type(t).is_empty() && !self.may_be_augment_member(key)).then_some(None),
+        }
     }
 
     // relater.go:1256

@@ -56,6 +56,10 @@ impl Checker {
     }
 }
 
+/// tsrs-only: the length up to which the maybe stack is searched by a scan instead of through `maybe_keys_set` (Go
+/// always uses the set); the set is kept only while the stack is longer.
+const MAYBE_STACK_SCAN_MAX: usize = 32;
+
 impl Relater {
     pub(crate) fn rel(&self) -> P<Relation> {
         self.relation.get().unwrap()
@@ -769,7 +773,7 @@ impl Relater {
             let census = c.census.as_mut().unwrap();
             if entry != RelationComparisonResult::None {
                 census.rel_cache[k][0] += 1;
-            } else if self.maybe_keys_set.borrow().has(&id) {
+            } else if self.maybe_stack_has(&id) {
                 census.rel_cache[k][2] += 1;
             } else {
                 census.rel_cache[k][1] += 1;
@@ -797,7 +801,7 @@ impl Relater {
             return Ternary::False;
         }
         // If source and target are already being compared, consider them related with assumptions
-        if self.maybe_keys_set.borrow().has(&id) {
+        if self.maybe_stack_has(&id) {
             tsrs_core::sitecount::hit("relation cache (recursiveTypeRelatedTo)", "maybe stack hit");
             return Ternary::Maybe;
         }
@@ -806,7 +810,7 @@ impl Relater {
         // were unconstrained.
         if constrained {
             let (broadest_equivalent_id, _) = get_relation_key(c, source, target, intersection_state, is_identity, true /*ignoreConstraints*/);
-            if self.maybe_keys_set.borrow().has(&broadest_equivalent_id) {
+            if self.maybe_stack_has(&broadest_equivalent_id) {
                 tsrs_core::sitecount::hit("relation cache (recursiveTypeRelatedTo)", "maybe stack hit (broadest)");
                 return Ternary::Maybe;
             }
@@ -818,8 +822,7 @@ impl Relater {
             return Ternary::Maybe;
         }
         let maybe_start = self.maybe_keys.borrow().len();
-        self.maybe_keys.borrow_mut().push(id);
-        self.maybe_keys_set.borrow_mut().add(id);
+        self.maybe_stack_push(id);
         let save_expanding_flags = self.expanding_flags.get();
         if recursion_flags.intersects(RecursionFlags::Source) {
             self.source_stack.borrow_mut().push(source);
@@ -883,15 +886,49 @@ impl Relater {
     pub(crate) fn reset_maybe_stack(&self, _c: &mut Checker, maybe_start: i32, propagating_variance_flags: RelationComparisonResult, mark_all_as_succeeded: bool) {
         let maybe_start = maybe_start as usize;
         let len = self.maybe_keys.borrow().len();
-        for i in maybe_start..len {
-            let key = self.maybe_keys.borrow()[i];
-            self.maybe_keys_set.borrow_mut().delete(&key);
-            if mark_all_as_succeeded {
+        if mark_all_as_succeeded {
+            for i in maybe_start..len {
+                let key = self.maybe_keys.borrow()[i];
                 Relation::set(&self.rel(), key, RelationComparisonResult::Succeeded | propagating_variance_flags);
                 self.relation_count.set(self.relation_count.get() - 1);
             }
         }
+        // `maybe_keys_set` mirrors the stack only while it is longer than MAYBE_STACK_SCAN_MAX (`maybe_stack_has`).
+        if maybe_start <= MAYBE_STACK_SCAN_MAX {
+            if len > MAYBE_STACK_SCAN_MAX {
+                self.maybe_keys_set.borrow_mut().clear();
+            }
+        } else {
+            let keys = self.maybe_keys.borrow();
+            let mut set = self.maybe_keys_set.borrow_mut();
+            for key in &keys[maybe_start..len] {
+                set.delete(key);
+            }
+        }
         self.maybe_keys.borrow_mut().truncate(maybe_start);
+    }
+
+    /// Whether `key` is on the maybe stack: a scan while the stack is short (nearly always), the set beyond.
+    #[inline]
+    fn maybe_stack_has(&self, key: &RelationKey) -> bool {
+        let keys = self.maybe_keys.borrow();
+        if keys.len() <= MAYBE_STACK_SCAN_MAX {
+            return keys.contains(key);
+        }
+        self.maybe_keys_set.borrow().has(key)
+    }
+
+    fn maybe_stack_push(&self, key: RelationKey) {
+        let mut keys = self.maybe_keys.borrow_mut();
+        keys.push(key);
+        let mut set = self.maybe_keys_set.borrow_mut();
+        if keys.len() == MAYBE_STACK_SCAN_MAX + 1 {
+            for &k in keys.iter() {
+                set.add(k);
+            }
+        } else if keys.len() > MAYBE_STACK_SCAN_MAX {
+            set.add(key);
+        }
     }
 
     // relater.go:3212
@@ -2058,7 +2095,18 @@ impl Relater {
             }
         }
         let require_optional_properties = (self.rel() == c.subtype_relation || self.rel() == c.strict_subtype_relation) && !is_object_literal_type(source) && !c.is_empty_array_literal_type(source) && !is_tuple_type(source);
-        let unmatched_property = c.get_unmatched_property(source, target, require_optional_properties, false /*matchDiscriminantProperties*/);
+        // tsrs-only: the loop below looks up the same names in `source` again; the lookups recorded here answer it.
+        let mut found = c.unmatched_found_pool.pop().unwrap_or_default();
+        found.clear();
+        let unmatched_property = c.get_unmatched_property_recording(source, target, require_optional_properties, &mut found);
+        let result = self.properties_related_to_rest(c, source, target, report_errors, excluded_properties, optionals_only, intersection_state, require_optional_properties, unmatched_property, &found);
+        c.unmatched_found_pool.push(found);
+        result
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "the tail of properties_related_to, split off to return its buffer to the pool")]
+    fn properties_related_to_rest(&self, c: &mut Checker, source: P<Type>, target: P<Type>, report_errors: bool, excluded_properties: &Set<String>, optionals_only: bool, intersection_state: IntersectionState, require_optional_properties: bool, unmatched_property: Option<P<Symbol>>, found: &[Option<Option<P<Symbol>>>]) -> Ternary {
+        let mut result = Ternary::True;
         if let Some(unmatched_property) = unmatched_property {
             if report_errors && c.should_report_unmatched_property_error(source, target) {
                 self.report_unmatched_property(c, source, target, unmatched_property, require_optional_properties);
@@ -2082,10 +2130,15 @@ impl Relater {
         // from the target union, across all members
         let properties = c.get_properties_of_type(target);
         let numeric_names_only = is_tuple_type(source) && is_tuple_type(target);
-        for target_prop in exclude_properties(&properties, excluded_properties).iter().copied() {
+        // `found` is by position in `properties` when it covers them all and nothing is excluded.
+        let found = if found.len() == properties.len() && excluded_properties.len() == 0 { found } else { &[] };
+        for (i, target_prop) in exclude_properties(&properties, excluded_properties).iter().copied().enumerate() {
             let name = target_prop.name();
             if !target_prop.flags().intersects(SymbolFlags::Prototype) && (!numeric_names_only || is_numeric_literal_name(name) || name == "length") && (!optionals_only || target_prop.flags().intersects(SymbolFlags::Optional)) {
-                let source_prop = c.get_property_of_type(source, name);
+                let source_prop = match found.get(i) {
+                    Some(&Some(source_prop)) => source_prop,
+                    _ => c.get_property_of_type(source, name),
+                };
                 if let Some(source_prop) = source_prop {
                     if source_prop != target_prop {
                         let skip_optional = self.rel() == c.comparable_relation;
