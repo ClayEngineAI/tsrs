@@ -1252,25 +1252,30 @@ pub(crate) fn has_matching_recursion_identity(c: &mut Checker, t: P<Type>, ident
 /// `has_matching_recursion_identity` of an intersection recursion identity target.
 #[inline(never)]
 fn intersection_has_matching_recursion_identity(c: &mut Checker, target: P<Type>, identity: RecursionId) -> bool {
-    // tsrs: the identities of the constituents (nested intersections' included) are kept per intersection: the
-    // deeply-nested test asks this of every intersection on the relater's stack each time, and they never change.
-    if let Some(ids) = c.intersection_recursion_ids.get(&target) {
-        return ids.contains(&identity);
-    }
-    let mut ids = Vec::new();
-    collect_intersection_recursion_ids(c, target, &mut ids);
-    let found = ids.contains(&identity);
-    c.intersection_recursion_ids.insert(target, ids.into_boxed_slice());
-    found
+    intersection_recursion_keys(c, target).contains(&recursion_key(identity))
 }
 
-fn collect_intersection_recursion_ids(c: &mut Checker, target: P<Type>, ids: &mut Vec<RecursionId>) {
+/// The `recursion_key`s of the identities of an intersection recursion identity target's constituents (nested
+/// intersections' included). tsrs: kept per intersection; the deeply-nested tests ask about them again and again, and
+/// they never change.
+fn intersection_recursion_keys(c: &mut Checker, target: P<Type>) -> &'static [u64] {
+    if let Some(&keys) = c.intersection_recursion_ids.get(&target) {
+        return keys;
+    }
+    let mut keys = Vec::new();
+    collect_intersection_recursion_keys(c, target, &mut keys);
+    let keys = alloc_slice(&keys);
+    c.intersection_recursion_ids.insert(target, keys);
+    keys
+}
+
+fn collect_intersection_recursion_keys(c: &mut Checker, target: P<Type>, keys: &mut Vec<u64>) {
     for &t in target.types() {
         let t = get_recursion_identity_target(c, t);
         if t.flags().intersects(TypeFlags::Intersection) {
-            collect_intersection_recursion_ids(c, t, ids);
+            collect_intersection_recursion_keys(c, t, keys);
         } else {
-            ids.push(get_recursion_identity_from_target(t));
+            keys.push(recursion_key(get_recursion_identity_from_target(t)));
         }
     }
 }
@@ -1522,7 +1527,7 @@ impl Checker {
         // Only full lookups are worth recording (has_property_of_type does not instantiate).
         let mut found = found.filter(|_| !lazy && !self.lazy_has_prop);
         let resolved_source = self.resolved_property_source(source);
-        for &target_prop in properties.iter() {
+        for (i, &target_prop) in properties.iter().enumerate() {
             // tsrs: the flag test first, the declaration-reading test only for a property that is looked up (both
             // only skip it).
             // TODO: remove this when we support static private identifier fields and find other solutions to get privateNamesAndStaticFields test to pass
@@ -1540,6 +1545,9 @@ impl Checker {
                     self.get_property_of_type(source, target_prop.name())
                 };
                 if let Some(found) = found.as_deref_mut() {
+                    // Only looked-up positions are written; the skipped ones in between (most: optional target
+                    // properties) are filled in bulk.
+                    found.resize(i, None);
                     found.push(Some(source_prop));
                 }
                 // notes/mem-lazy.md L10: a declared member stands in for the target property until the property
@@ -1577,9 +1585,10 @@ impl Checker {
                         }
                     }
                 }
-            } else if let Some(found) = found.as_deref_mut() {
-                found.push(None);
             }
+        }
+        if let Some(found) = found {
+            found.resize(properties.len(), None);
         }
         None
     }

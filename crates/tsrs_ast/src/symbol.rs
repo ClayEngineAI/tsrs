@@ -434,12 +434,10 @@ struct SymbolMapEntry(u64);
 
 const _: () = assert!(std::mem::size_of::<SymbolMapEntry>() == 8);
 
-/// The key fingerprint stored in an entry (above the address bits): length capped at 63, 12 hash bits.
+/// The key fingerprint stored in an entry (above the address bits): length capped at 63, then 12 hash bits above it.
+/// One word, so testing an entry is one shift and one compare.
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct KeyPrint {
-    len: u64,
-    hash: u64,
-}
+struct KeyPrint(u64);
 
 impl KeyPrint {
     #[inline]
@@ -454,7 +452,7 @@ impl KeyPrint {
 
     #[inline]
     fn of(name: &str, hash: u32) -> KeyPrint {
-        KeyPrint { len: Self::len_bits(name), hash: Self::hash_bits(hash) }
+        KeyPrint(Self::len_bits(name) | Self::hash_bits(hash) << (SymbolMapEntry::HASH_SHIFT - SymbolMapEntry::LEN_SHIFT))
     }
 }
 
@@ -474,7 +472,7 @@ impl SymbolMapEntry {
 
     #[inline]
     fn new(symbol: P<Symbol>, print: KeyPrint) -> SymbolMapEntry {
-        SymbolMapEntry(Self::addr_bits(symbol) | print.len << Self::LEN_SHIFT | print.hash << Self::HASH_SHIFT)
+        SymbolMapEntry(Self::addr_bits(symbol) | print.0 << Self::LEN_SHIFT)
     }
 
     #[inline]
@@ -494,13 +492,10 @@ impl SymbolMapEntry {
     }
 
     #[inline]
-    fn len_bits(self) -> u64 {
-        (self.0 >> Self::LEN_SHIFT) & Self::LEN_MASK
-    }
-
-    #[inline]
     fn print(self) -> KeyPrint {
-        KeyPrint { len: self.len_bits(), hash: self.0 >> Self::HASH_SHIFT }
+        // The length and hash bits are the top bits of the word.
+        const { assert!(SymbolMapEntry::HASH_SHIFT + SymbolMapEntry::HASH_BITS == 64) };
+        KeyPrint(self.0 >> Self::LEN_SHIFT)
     }
 }
 
@@ -1099,5 +1094,35 @@ mod tests {
             assert!(filter.may_contain(HashedName::new(name)), "{name}");
         }
         assert!(!NameFilter::default().may_contain(HashedName::new("member0")));
+    }
+
+    #[test]
+    fn index_finds_every_key_through_growth_and_deletes() {
+        // Past the linear limit and 255 entries, presized and grown, with deletes, an odd key and a replaced symbol.
+        for presized in [0, 20, 300] {
+            let table = if presized == 0 { SymbolTable::new() } else { SymbolTable::with_capacity(presized) };
+            let names: Vec<&'static str> = (0..600).map(|i| &*Box::leak(format!("k{i}").into_boxed_str())).collect();
+            let mut expected: Vec<(&'static str, P<Symbol>)> = Vec::new();
+            for (i, &name) in names.iter().enumerate() {
+                let symbol = Symbol::new(SymbolFlags::Property, if i == 7 { "odd" } else { name });
+                table.set(name, symbol);
+                expected.push((name, symbol));
+                if i % 97 == 50 {
+                    let gone = expected.remove(i / 3).0;
+                    table.delete(gone);
+                    assert!(table.lookup(gone).is_none(), "{gone}");
+                }
+                if i % 89 == 3 {
+                    let replaced = Symbol::new(SymbolFlags::Property, expected[i / 2].0);
+                    table.set(expected[i / 2].0, replaced);
+                    expected[i / 2].1 = replaced;
+                }
+                for &(name, symbol) in &expected {
+                    assert!(table.lookup(name) == Some(symbol), "{name} after {i}");
+                }
+                assert!(table.lookup("absent").is_none());
+            }
+            assert_eq!(table.entries(), expected);
+        }
     }
 }

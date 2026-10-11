@@ -430,12 +430,49 @@ impl Checker {
     // utilities.go:361
     pub(crate) fn sort_symbols(&mut self, symbols: &mut [P<Symbol>]) {
         if self.program.source_files_complete() {
+            if symbols.len() > 2 && self.sort_symbols_by_key(symbols) {
+                return;
+            }
             symbols.sort_by(|&a, &b| self.compare_symbols(Some(a), Some(b)));
         } else {
             // Not a total order (see `Program::source_files_complete`): Rust's sort would panic, Go's pdqsort sorts
             // anyway; its port gives Go's order.
             tsrs_core::goslices::sort_func(symbols, |&a, &b| self.compare_symbols(Some(a), Some(b)));
         }
+    }
+
+    /// tsrs-only: `sort_symbols` with each symbol's place computed once instead of in every comparison. With every
+    /// file of the program indexed, `compare_symbols` orders by (a first declaration, its file's index, its position,
+    /// name, id), lexicographically. False (nothing sorted) when a declaration's file has no index.
+    fn sort_symbols_by_key(&mut self, symbols: &mut [P<Symbol>]) -> bool {
+        let mut keyed: Vec<(bool, usize, tsrs_core::TextPos, &'static str, P<Symbol>)> = Vec::with_capacity(symbols.len());
+        for &symbol in symbols.iter() {
+            let key = match symbol.declarations().first() {
+                Some(&d) => {
+                    let (file, index) = self.source_file_and_index_of_node(d);
+                    // Index 0 is also what a file without one gets.
+                    if file == 0 || index == 0 && ast::get_source_file_of_node(d).is_none_or(|s| !self.file_index_map.contains_key(&s)) {
+                        return false;
+                    }
+                    (false, index, d.pos())
+                }
+                None => (true, 0, tsrs_core::TextPos::Synthetic),
+            };
+            keyed.push((key.0, key.1, key.2, symbol.name(), symbol));
+        }
+        // The id last, and only for a tie (getting it assigns one, as in `compare_symbols_worker`).
+        keyed.sort_by(|a, b| {
+            (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)).then_with(|| compare_names(a.3, b.3)).then_with(|| {
+                if a.4 == b.4 {
+                    return Ordering::Equal;
+                }
+                ast::get_symbol_id(a.4).0.cmp(&ast::get_symbol_id(b.4).0)
+            })
+        });
+        for (slot, k) in symbols.iter_mut().zip(keyed) {
+            *slot = k.4;
+        }
+        true
     }
 
     // utilities.go:365
@@ -566,7 +603,17 @@ pub fn compare_types(c: &mut Checker, t1: Option<P<Type>>, t2: Option<P<Type>>) 
     if r != Ordering::Equal {
         return r;
     }
+    // Two string literals without aliases (no name symbol): by value, then id, as compare_types_same_flags orders
+    // them. Large unions of string literals are built by binary insertion with this.
+    if t1.flags() == TypeFlags::StringLiteral && t1.alias().is_none() && t2.alias().is_none() {
+        return compare_string_literal_types(t1, t2);
+    }
     compare_types_same_flags(c, t1, t2)
+}
+
+#[inline(never)]
+fn compare_string_literal_types(t1: P<Type>, t2: P<Type>) -> Ordering {
+    literal_string_value(t1).cmp(literal_string_value(t2)).then_with(|| t1.id().0.cmp(&t2.id().0))
 }
 
 #[inline(never)]
@@ -1077,6 +1124,16 @@ pub(crate) fn compare_type_mappers(
 // utilities.go:757
 pub fn get_declaration_modifier_flags_from_symbol(s: P<Symbol>) -> ModifierFlags {
     get_declaration_modifier_flags_from_symbol_ex(s, false /*isWrite*/)
+}
+
+/// The `Private` and `Protected` bits of `get_declaration_modifier_flags_from_symbol(s)`. A declared symbol whose parent
+/// is not a class has neither (its accessibility modifiers are dropped below), so its declaration is not read.
+#[inline]
+pub(crate) fn get_declaration_non_public_flags_from_symbol(s: P<Symbol>) -> ModifierFlags {
+    if !s.check_flags.get().intersects(CheckFlags::Synthetic) && !s.parent().is_some_and(|p| p.flags().intersects(SymbolFlags::Class)) {
+        return ModifierFlags::None;
+    }
+    get_declaration_modifier_flags_from_symbol(s) & ModifierFlags::NonPublicAccessibilityModifier
 }
 
 // utilities.go:761
