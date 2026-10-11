@@ -585,13 +585,8 @@ impl Checker {
 
 // flow.go:208
 pub(crate) fn get_branch_label_antecedents(flow: P<FlowNode>, reduce_labels: &[P<ast::FlowReduceLabelData>]) -> Option<P<FlowList>> {
-    let mut i = reduce_labels.len();
-    while i != 0 {
-        i -= 1;
-        let data = reduce_labels[i];
-        if data.target == flow {
-            return data.antecedents;
-        }
+    if let Some(data) = reduce_labels.iter().rev().find(|data| data.target == flow) {
+        return data.antecedents;
     }
     flow.antecedents()
 }
@@ -1482,10 +1477,10 @@ impl Checker {
         let construct_signatures = self.get_signatures_of_type(constructor_type, SignatureKind::Construct);
         if !construct_signatures.is_empty() {
             let mut types = Vec::with_capacity(construct_signatures.len());
-            for &signature in construct_signatures {
+            types.extend(construct_signatures.iter().map(|&signature| {
                 let erased = self.get_erased_signature(signature);
-                types.push(self.get_return_type_of_signature(erased));
-            }
+                self.get_return_type_of_signature(erased)
+            }));
             return self.get_union_type(&types);
         }
         // We use the empty object type to indicate we don't know the type of objects created by
@@ -1702,13 +1697,7 @@ impl Checker {
         // In the non-default cause we create a union of the type narrowed by each of the listed cases.
         let clause_witnesses = &witnesses[clause_start..clause_end];
         let mut types = Vec::with_capacity(clause_witnesses.len());
-        for &text in clause_witnesses {
-            if !text.is_empty() {
-                types.push(self.narrow_type_by_type_name(t, text));
-            } else {
-                types.push(self.never_type);
-            }
-        }
+        types.extend(clause_witnesses.iter().map(|&text| if !text.is_empty() { self.narrow_type_by_type_name(t, text) } else { self.never_type }));
         self.get_union_type(&types)
     }
 
@@ -1731,8 +1720,8 @@ impl Checker {
         let has_default_clause = clause_start == clause_end
             || default_index.is_some_and(|index| index >= clause_start && index < clause_end);
         // First, narrow away all of the cases that preceded this set of cases.
-        for i in 0..clause_start {
-            let clause = clauses[i];
+        for element in clauses[..clause_start].iter() {
+            let clause = *element;
             if clause.kind() == Kind::CaseClause {
                 t = self.narrow_type(f, t, clause.expression().unwrap(), false /*assumeTrue*/);
             }
@@ -1741,8 +1730,8 @@ impl Checker {
         // There's no point in narrowing by the other cases in the set, since we can
         // get here through other paths.
         if has_default_clause {
-            for i in clause_end..clauses.len() {
-                let clause = clauses[i];
+            for element in clauses.iter().skip(clause_end) {
+                let clause = *element;
                 if clause.kind() == Kind::CaseClause {
                     t = self.narrow_type(f, t, clause.expression().unwrap(), false /*assumeTrue*/);
                 }
@@ -1751,13 +1740,13 @@ impl Checker {
         }
         // Now, narrow based on the cases in this set.
         let mut types = Vec::with_capacity(clause_end - clause_start);
-        for &clause in &clauses[clause_start..clause_end] {
+        types.extend(clauses[clause_start..clause_end].iter().map(|&clause| {
             if clause.kind() == Kind::CaseClause {
-                types.push(self.narrow_type(f, t, clause.expression().unwrap(), true /*assumeTrue*/));
+                self.narrow_type(f, t, clause.expression().unwrap(), true /*assumeTrue*/)
             } else {
-                types.push(self.never_type);
+                self.never_type
             }
-        }
+        }));
         self.get_union_type(&types)
     }
 
@@ -1767,13 +1756,9 @@ impl Checker {
         let data = data.as_flow_switch_clause_data();
         let every_clause_checks = data.clause_start != data.clause_end && {
             let switch_types = self.get_switch_clause_types(data.switch_statement);
-            let mut every = true;
-            for &s in &switch_types[data.clause_start..data.clause_end] {
-                if !clause_check(self, s) {
-                    every = false;
-                    break;
-                }
-            }
+            let every = !(switch_types[data.clause_start..data.clause_end]
+                .iter()
+                .any(|&s| !clause_check(self, s)));
             every
         };
         if every_clause_checks {
@@ -1792,13 +1777,13 @@ impl Checker {
                     [clause_data.clause_start..clause_data.clause_end]
                     .to_vec();
                 let mut types = Vec::with_capacity(clause_types.len());
-                for s in clause_types {
+                types.extend(clause_types.into_iter().map(|s| {
                     let result = self.get_constituent_type_for_key_type(t, s);
                     match result {
-                        Some(result) => types.push(result),
-                        None => types.push(self.unknown_type),
+                        Some(result) => result,
+                        None => self.unknown_type,
                     }
-                }
+                }));
                 let candidate = self.get_union_type(&types);
                 if candidate != self.unknown_type {
                     return candidate;
@@ -1891,16 +1876,12 @@ impl Checker {
     pub(crate) fn get_union_or_evolving_array_type(&mut self, f: P<FlowState>, types: &[P<Type>], subtype_reduction: UnionReduction) -> P<Type> {
         if is_evolving_array_type_list(types) {
             let mut element_types = Vec::with_capacity(types.len());
-            for &t in types {
-                element_types.push(self.get_element_type_of_evolving_array_type(t));
-            }
+            element_types.extend(types.iter().map(|&t| self.get_element_type_of_evolving_array_type(t)));
             let union_type = self.get_union_type(&element_types);
             return self.get_evolving_array_type(union_type);
         }
         let mut finalized_types = Vec::with_capacity(types.len());
-        for &t in types {
-            finalized_types.push(self.finalize_evolving_array_type(t));
-        }
+        finalized_types.extend(types.iter().map(|&t| self.finalize_evolving_array_type(t)));
         let union_type = self.get_union_type_ex(&finalized_types, subtype_reduction, AliasArg::None, None);
         let result = self.recombine_unknown_type(union_type);
         let declared_type = f.declared();
@@ -2023,9 +2004,11 @@ impl Checker {
                 if flow_type_t.object_flags().intersects(ObjectFlags::EvolvingArray) {
                     let mut evolved_type = flow_type_t;
                     if ast::is_call_expression(node) {
-                        for &arg in node.arguments() {
+                        evolved_type = node.arguments().iter().fold(evolved_type, |mut evolved_type, &arg| {
                             evolved_type = self.add_evolving_array_element_type(evolved_type, arg);
-                        }
+
+                            evolved_type
+                        });
                     } else {
                         // We must get the context free expression type so as to not recur in an uncached fashion on the LHS (which causes exponential blowup in compile time)
                         let index_type = self.get_context_free_type_of_expression(node.as_binary_expression().left.as_element_access_expression().argument_expression);
@@ -2618,10 +2601,12 @@ impl Checker {
 
     // flow.go:1886
     pub(crate) fn has_matching_argument(&mut self, expression: P<Node>, reference: P<Node>) -> bool {
-        for &argument in expression.arguments() {
-            if self.is_or_contains_matching_reference(reference, argument) || self.optional_chain_contains_reference(argument, reference) {
-                return true;
-            }
+        if expression
+            .arguments()
+            .iter()
+            .any(|&argument| self.is_or_contains_matching_reference(reference, argument) || self.optional_chain_contains_reference(argument, reference))
+        {
+            return true;
         }
         let callee = expression.expression().unwrap();
         if ast::is_property_access_expression(callee) && self.is_or_contains_matching_reference(reference, callee.expression().unwrap()) {
@@ -2784,9 +2769,7 @@ impl Checker {
         if !links.switch_types_computed.get() {
             let clauses = node.as_switch_statement().case_block.as_case_block().clauses.nodes();
             let mut types = Vec::with_capacity(clauses.len());
-            for &clause in clauses {
-                types.push(self.get_type_of_switch_clause(clause));
-            }
+            types.extend(clauses.iter().map(|&clause| self.get_type_of_switch_clause(clause)));
             links.switch_types.set(alloc_vec(types));
             links.switch_types_computed.set(true);
         }
@@ -3258,12 +3241,7 @@ impl Checker {
             return true;
         }
         // Otherwise, check if any constituent type of the source union is assignable to the target type
-        for &t in source.types() {
-            if self.is_type_assignable_to(t, target) {
-                return true;
-            }
-        }
-        false
+        source.types().iter().any(|&t| self.is_type_assignable_to(t, target))
     }
 
     // flow.go:2451
@@ -3321,7 +3299,7 @@ impl Checker {
         } else {
             self.factory.new_identifier(symbol_name)
         };
-        for &static_block in static_blocks {
+        if let Some(result) = static_blocks.iter().find_map(|&static_block| {
             let this_keyword = self.factory.new_keyword_expression(Kind::ThisKeyword);
             let reference = self.factory.new_property_access_expression(this_keyword, None, access_name, NodeFlags::None);
             reference.expression().unwrap().set_parent(Some(reference));
@@ -3335,9 +3313,11 @@ impl Checker {
             }
             // We don't infer a type if assignments are only null or undefined.
             if every_type(self, flow_type, |c, t| c.is_nullable_type(t)) {
-                continue;
+                return None;
             }
-            return Some(self.convert_auto_to_any(flow_type));
+            Some(Some(self.convert_auto_to_any(flow_type)))
+        }) {
+            return result;
         }
         None
     }

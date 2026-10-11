@@ -59,15 +59,20 @@ impl LanguageService {
         let (_, source_file) = self.get_program_and_file(&params.text_document.uri);
 
         let mut results = Vec::with_capacity(params.positions.len());
-        for &position in &params.positions {
+        results = match params.positions.iter().try_fold(results, |mut results, &position| {
             let positions = self.converters.from_lsp_position_for_source_file(source_file, position, Feature::SelectionRanges);
             if positions.len() != 1 || !positions[0].fidelity.is_single_segment() {
-                return Ok(lsproto::SelectionRangesOrNull::default());
+                return std::ops::ControlFlow::Break(Ok(lsproto::SelectionRangesOrNull::default()));
             }
             if let Some(selection_range) = get_smart_selection_range(self, positions[0].script, positions[0].position) {
                 results.push(selection_range);
             }
-        }
+
+            std::ops::ControlFlow::Continue(results)
+        }) {
+            std::ops::ControlFlow::Continue(value) => value,
+            std::ops::ControlFlow::Break(value) => return value,
+        };
 
         Ok(lsproto::SelectionRangesOrNull { selection_ranges: Some(results) })
     }
@@ -244,9 +249,8 @@ impl SmartSelection<'_> {
 
         let mut comment_pos = start;
         let text = self.source_file.text().as_bytes();
-        while comment_pos < end && (comment_pos as usize) < text.len() && text[comment_pos as usize] == b'/' {
-            comment_pos += 1;
-        }
+        comment_pos += u32::try_from((comment_pos..end).take_while(|&index| (index as usize) < text.len() && text[index as usize] == b'/').count())
+            .expect("comment length exceeds u32");
         self.push_selection_range(comment_pos, end);
     }
 

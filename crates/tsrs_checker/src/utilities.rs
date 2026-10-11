@@ -976,14 +976,14 @@ pub(crate) fn compare_tuple_types(t1: &'static TupleType, t2: &'static TupleType
     if e1.len() != e2.len() {
         return e1.len().cmp(&e2.len());
     }
-    for i in 0..e1.len() {
-        let r = e1[i].flags.bits().cmp(&e2[i].flags.bits());
+    for (i, element) in e1.iter().enumerate() {
+        let r = (*element).flags.bits().cmp(&e2[i].flags.bits());
         if r != Ordering::Equal {
             return r;
         }
     }
-    for i in 0..e1.len() {
-        let r = compare_element_labels(e1[i].labeled_declaration, e2[i].labeled_declaration);
+    for (i, element) in e1.iter().enumerate() {
+        let r = compare_element_labels((*element).labeled_declaration, e2[i].labeled_declaration);
         if r != Ordering::Equal {
             return r;
         }
@@ -1010,11 +1010,15 @@ pub(crate) fn compare_type_lists(c: &mut Checker, s1: &[P<Type>], s2: &[P<Type>]
     if s1.len() != s2.len() {
         return s1.len().cmp(&s2.len());
     }
-    for (i, &t1) in s1.iter().enumerate() {
+    if let Some(result) = s1.iter().enumerate().find_map(|(i, &t1)| {
         let r = compare_types(c, Some(t1), Some(s2[i]));
         if r != Ordering::Equal {
-            return r;
+            return Some(r);
         }
+
+        None
+    }) {
+        return result;
     }
     Ordering::Equal
 }
@@ -1180,9 +1184,7 @@ impl<T: Copy + Eq + std::hash::Hash> orderedSet<T> {
                 return;
             }
             let mut m = FxHashSet::with_capacity_and_hasher(self.values.len(), Default::default());
-            for &v in &self.values[..self.values.len() - 1] {
-                m.insert(v);
-            }
+            m.extend(self.values[..self.values.len() - 1].iter().map(|&v| v));
             self.values_by_key = Some(m);
         }
         self.values_by_key.as_mut().unwrap().insert(value);
@@ -1733,12 +1735,16 @@ pub(crate) fn all_declarations_in_same_source_file(symbol: P<Symbol>) -> bool {
     let declarations = symbol.declarations();
     if declarations.len() > 1 {
         let mut source_file: Option<P<SourceFile>> = None;
-        for (i, &d) in declarations.iter().enumerate() {
+        if declarations.iter().enumerate().any(|(i, &d)| {
             if i == 0 {
                 source_file = ast::get_source_file_of_node(d);
             } else if ast::get_source_file_of_node(d) != source_file {
-                return false;
+                return true;
             }
+
+            false
+        }) {
+            return false;
         }
     }
     true

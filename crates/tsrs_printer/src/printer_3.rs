@@ -964,16 +964,9 @@ impl Printer {
         }
 
         let mut comments: Vec<CommentRange> = Vec::new();
-        for comment in scanner::get_leading_comment_ranges(
-            current_source_file.text(),
-            pos.expect_source("source comments have source positions"),
-        ) {
-            if self.should_write_comment(comment)
-                && self.should_emit_comment_if_triple_slash(comment, triple_slash)
-            {
-                comments.push(comment);
-            }
-        }
+        comments.extend(scanner::get_leading_comment_ranges(current_source_file.text(), pos.expect_source("source comments have source positions"), ).filter_map(|comment| {
+            if self.should_write_comment(comment) && self.should_emit_comment_if_triple_slash(comment, triple_slash) { Some(comment) } else { None }
+        }));
 
         if !comments.is_empty()
             && self.should_emit_new_line_before_leading_comment_of_position(
@@ -1037,14 +1030,19 @@ impl Printer {
         }
 
         let mut comments: Vec<CommentRange> = Vec::new();
-        for comment in scanner::get_trailing_comment_ranges(
-            current_source_file.text(),
-            pos.expect_source("source comments have source positions"),
-        ) {
-            if self.should_write_comment(comment) {
-                comments.push(comment);
-            }
-        }
+        comments.extend(
+            scanner::get_trailing_comment_ranges(
+                current_source_file.text(),
+                pos.expect_source("source comments have source positions"),
+            )
+            .filter_map(|comment| {
+                if self.should_write_comment(comment) {
+                    Some(comment)
+                } else {
+                    None
+                }
+            }),
+        );
 
         // trailing comments are normally emitted as space/*trailing comment1*/space/*trailing comment2*/
         self.emit_comments(&comments, comment_separator);
@@ -1128,16 +1126,21 @@ impl Printer {
             //
             //      var x = 10;
             if text_range.pos().source_offset() == Some(0) {
-                for comment in scanner::get_leading_comment_ranges(
-                    text,
-                    text_range
-                        .pos()
-                        .expect_source("detached comment ranges have source positions"),
-                ) {
-                    if is_pinned_comment(text, comment) {
-                        leading_comments.push(comment);
-                    }
-                }
+                leading_comments.extend(
+                    scanner::get_leading_comment_ranges(
+                        text,
+                        text_range
+                            .pos()
+                            .expect_source("detached comment ranges have source positions"),
+                    )
+                    .filter_map(|comment| {
+                        if is_pinned_comment(text, comment) {
+                            Some(comment)
+                        } else {
+                            None
+                        }
+                    }),
+                );
             }
         } else {
             // removeComments is false, just get detached as normal and bypass the process to filter comment
@@ -1193,11 +1196,8 @@ impl Printer {
 
                     // Filter to only comments that should be written (e.g., JSDoc-style in declaration emit)
                     let mut comments_to_emit: Vec<CommentRange> = Vec::new();
-                    for comment in &detached_comments {
-                        if self.should_write_comment(*comment) {
-                            comments_to_emit.push(*comment);
-                        }
-                    }
+                    comments_to_emit
+                        .extend(detached_comments.iter().filter_map(|comment| if self.should_write_comment(*comment) { Some(*comment) } else { None }));
 
                     if !comments_to_emit.is_empty() {
                         if self.should_emit_new_line_before_leading_comment_of_position(

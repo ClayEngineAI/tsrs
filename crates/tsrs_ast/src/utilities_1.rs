@@ -922,6 +922,7 @@ pub fn walk_up_parenthesized_types(node: impl Into<Option<P<Node>>>) -> Option<P
 }
 
 // Walks up the parents of a node to find the containing SourceFile
+// Keep early-returning parent walks as loops; see notes/perf-iterator-regressions.md.
 pub fn get_source_file_of_node(node: impl Into<Option<P<Node>>>) -> Option<P<SourceFile>> {
     let mut node = node.into();
     while let Some(n) = node {
@@ -1054,9 +1055,11 @@ pub fn modifier_to_flag(token: Kind) -> ModifierFlags {
 
 pub fn modifiers_to_flags(modifiers: &[P<Node>]) -> ModifierFlags {
     let mut flags = ModifierFlags::None;
-    for modifier in modifiers {
+    flags = modifiers.iter().fold(flags, |mut flags, modifier| {
         flags |= modifier_to_flag(modifier.kind());
-    }
+
+        flags
+    });
     flags
 }
 
@@ -1311,10 +1314,8 @@ pub fn get_combined_node_flags(node: P<Node>) -> NodeFlags {
 pub fn get_jsdoc_deprecated_tag(node: P<Node>) -> Option<P<Node>> {
     for &jsdoc in node.jsdoc(None) {
         if let Some(tags) = jsdoc.as_jsdoc().tags {
-            for &tag in tags.nodes() {
-                if is_jsdoc_deprecated_tag(tag) {
-                    return Some(tag);
-                }
+            if let Some(result) = tags.nodes().iter().find_map(|&tag| if is_jsdoc_deprecated_tag(tag) { Some(Some(tag)) } else { None }) {
+                return result;
             }
         }
     }

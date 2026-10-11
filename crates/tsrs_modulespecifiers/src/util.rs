@@ -44,13 +44,13 @@ pub fn path_is_bare_specifier(path: &str) -> bool {
 
 // util.go:46
 pub fn is_excluded_by_regex(module_specifier: &str, excludes: &[String]) -> bool {
-    for pattern in excludes {
+    if excludes.iter().any(|pattern| {
         let Some(re) = string_to_regex(pattern) else {
-            continue;
+            return false;
         };
-        if re.is_match(module_specifier) {
-            return true;
-        }
+        re.is_match(module_specifier)
+    }) {
+        return true;
     }
     false
 }
@@ -63,23 +63,13 @@ pub(crate) fn string_to_regex(pattern: &str) -> Option<P<regex::Regex>> {
     if pattern.len() > 2 && pattern.as_bytes()[0] == b'/' {
         if let Some(last_slash) = pattern.rfind('/').filter(|&index| index > 0) {
             let bytes = pattern.as_bytes();
-            let mut has_unescaped_middle_slash = false;
-            for i in 1..last_slash {
-                if bytes[i] == b'/' && (i == 0 || bytes[i - 1] != b'\\') {
-                    has_unescaped_middle_slash = true;
-                    break;
-                }
-            }
+            let has_unescaped_middle_slash = (1..last_slash).any(|i| bytes[i] == b'/' && (i == 0 || bytes[i - 1] != b'\\'));
 
             if !has_unescaped_middle_slash {
                 let flags = &pattern[last_slash + 1..];
                 pattern = &pattern[1..last_slash];
 
-                for flag in flags.chars() {
-                    if flag == 'i' {
-                        case_insensitive = true;
-                    }
-                }
+                case_insensitive |= flags.contains('i');
             }
         }
     }
@@ -201,13 +191,11 @@ pub(crate) fn try_get_any_file_from_path(host: &dyn ModuleSpecifierGenerationHos
         Some(&CompilerOptions { allow_js: Tristate::True, ..Default::default() }),
         &[".node".to_string(), ".json".to_string()],
     );
-    for exts in &ext_groups {
-        for e in exts {
-            let full_path = format!("{path}{e}");
-            if host.file_exists(&tspath::get_normalized_absolute_path(&full_path, host.get_current_directory())) {
-                return true;
-            }
-        }
+    if ext_groups.iter().flatten().any(|e| {
+        let full_path = format!("{path}{e}");
+        host.file_exists(&tspath::get_normalized_absolute_path(&full_path, host.get_current_directory()))
+    }) {
+        return true;
     }
     false
 }
@@ -215,12 +203,10 @@ pub(crate) fn try_get_any_file_from_path(host: &dyn ModuleSpecifierGenerationHos
 // util.go:214
 pub(crate) fn get_paths_relative_to_root_dirs(path: &str, root_dirs: &[String], use_case_sensitive_file_names: bool) -> Vec<String> {
     let mut results = Vec::new();
-    for root_dir in root_dirs {
+    results.extend(root_dirs.iter().filter_map(|root_dir| {
         let relative_path = get_relative_path_if_in_same_volume(path, root_dir, use_case_sensitive_file_names);
-        if !is_path_relative_to_parent(&relative_path) {
-            results.push(relative_path);
-        }
-    }
+        if !is_path_relative_to_parent(&relative_path) { Some(relative_path) } else { None }
+    }));
     results
 }
 
@@ -344,7 +330,7 @@ pub fn get_node_modules_package_name(
 ) -> String {
     let info = get_info(importing_source_file.file_name(), host);
     let module_paths = get_all_module_paths(&info, node_modules_file_name, host, compiler_options, preferences, options);
-    for module_path in &module_paths {
+    if let Some(result) = module_paths.iter().find_map(|module_path| {
         let result = try_get_module_name_as_node_module(
             module_path,
             &info,
@@ -356,8 +342,12 @@ pub fn get_node_modules_package_name(
             options.override_import_mode,
         );
         if !result.is_empty() {
-            return result;
+            return Some(result);
         }
+
+        None
+    }) {
+        return result;
     }
     String::new()
 }

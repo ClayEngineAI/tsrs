@@ -62,8 +62,8 @@ fn compare_message_chain_size(c1: &[Diag], c2: &[Diag]) -> Ordering {
     if !c.is_eq() {
         return c;
     }
-    for i in 0..c1.len() {
-        let c = compare_message_chain_size(&c1[i].chain, &c2[i].chain);
+    for (i, element) in c1.iter().enumerate() {
+        let c = compare_message_chain_size(&(*element).chain, &c2[i].chain);
         if !c.is_eq() {
             return c;
         }
@@ -72,13 +72,13 @@ fn compare_message_chain_size(c1: &[Diag], c2: &[Diag]) -> Ordering {
 }
 
 fn compare_message_chain_content(c1: &[Diag], c2: &[Diag]) -> Ordering {
-    for i in 0..c1.len() {
-        let c = compare_string_slices(&c1[i].args, &c2[i].args);
+    for (i, element) in c1.iter().enumerate() {
+        let c = compare_string_slices(&(*element).args, &c2[i].args);
         if !c.is_eq() {
             return c;
         }
-        if !c1[i].chain.is_empty() {
-            let c = compare_message_chain_content(&c1[i].chain, &c2[i].chain);
+        if !(*element).chain.is_empty() {
+            let c = compare_message_chain_content(&(*element).chain, &c2[i].chain);
             if !c.is_eq() {
                 return c;
             }
@@ -92,8 +92,8 @@ fn compare_related_info(r1: &[Diag], r2: &[Diag]) -> Ordering {
     if !c.is_eq() {
         return c;
     }
-    for i in 0..r1.len() {
-        let c = compare_diagnostics(&r1[i], &r2[i]);
+    for (i, element) in r1.iter().enumerate() {
+        let c = compare_diagnostics(&(*element), &r2[i]);
         if !c.is_eq() {
             return c;
         }
@@ -417,9 +417,7 @@ pub fn write_flattened_diagnostic_message(writer: &mut String, diagnostic: &Diag
 
 fn flatten_diagnostic_message_chain(writer: &mut String, chain: &Diag, new_line: &str, level: usize) {
     writer.push_str(new_line);
-    for _ in 0..level {
-        writer.push_str("  ");
-    }
+    writer.extend((0..level).map(|_| "  "));
     writer.push_str(&chain.message);
     for child in &chain.chain {
         flatten_diagnostic_message_chain(writer, child, new_line, level + 1);

@@ -15,11 +15,7 @@ pub fn filter<T: Clone>(slice: &[T], mut f: impl FnMut(&T) -> bool) -> Cow<'_, [
     for (i, value) in slice.iter().enumerate() {
         if !f(value) {
             let mut result = slice[..i].to_vec();
-            for value in &slice[i + 1..] {
-                if f(value) {
-                    result.push(value.clone());
-                }
-            }
+            result.extend(slice[i + 1..].iter().filter_map(|value| if f(value) { Some(value.clone()) } else { None }));
             return Cow::Owned(result);
         }
     }
@@ -30,11 +26,7 @@ pub fn filter_index<T: Clone>(slice: &[T], mut f: impl FnMut(&T, usize, &[T]) ->
     for (i, value) in slice.iter().enumerate() {
         if !f(value, i, slice) {
             let mut result = slice[..i].to_vec();
-            for j in i + 1..slice.len() {
-                if f(&slice[j], j, slice) {
-                    result.push(slice[j].clone());
-                }
-            }
+            result.extend((i + 1..slice.len()).filter_map(|j| if f(&slice[j], j, slice) { Some(slice[j].clone()) } else { None }));
             return Cow::Owned(result);
         }
     }
@@ -47,9 +39,10 @@ pub fn map<T, U>(slice: &[T], f: impl FnMut(&T) -> U) -> Vec<U> {
 
 pub fn try_map<T, U, E>(slice: &[T], mut f: impl FnMut(&T) -> Result<U, E>) -> Result<Vec<U>, E> {
     let mut result = Vec::with_capacity(slice.len());
-    for value in slice {
+    result = slice.iter().try_fold(result, |mut result, value| {
         result.push(f(value)?);
-    }
+        Ok::<_, E>(result)
+    })?;
     Ok(result)
 }
 
@@ -66,11 +59,9 @@ pub fn map_filtered<T, U>(slice: &[T], f: impl FnMut(&T) -> Option<U>) -> Vec<U>
     slice.iter().filter_map(f).collect()
 }
 
-pub fn flat_map<T, U, I: IntoIterator<Item = U>>(slice: &[T], mut f: impl FnMut(&T) -> I) -> Vec<U> {
+pub fn flat_map<T, U, I: IntoIterator<Item = U>>(slice: &[T], f: impl FnMut(&T) -> I) -> Vec<U> {
     let mut result = Vec::new();
-    for value in slice {
-        result.extend(f(value));
-    }
+    result.extend(slice.iter().flat_map(f));
     result
 }
 
@@ -81,9 +72,7 @@ pub fn same_map<T: Clone + PartialEq>(slice: &[T], mut f: impl FnMut(&T) -> T) -
             let mut result = Vec::with_capacity(slice.len());
             result.extend_from_slice(&slice[..i]);
             result.push(mapped);
-            for v in &slice[i + 1..] {
-                result.push(f(v));
-            }
+            result.extend(slice[i + 1..].iter().map(&mut f));
             return Cow::Owned(result);
         }
     }
@@ -97,9 +86,7 @@ pub fn same_map_index<T: Clone + PartialEq>(slice: &[T], mut f: impl FnMut(&T, u
             let mut result = Vec::with_capacity(slice.len());
             result.extend_from_slice(&slice[..i]);
             result.push(mapped);
-            for j in i + 1..slice.len() {
-                result.push(f(&slice[j], j));
-            }
+            result.extend((i + 1..slice.len()).map(|j| f(&slice[j], j)));
             return Cow::Owned(result);
         }
     }
@@ -164,10 +151,8 @@ pub fn first_non_nil<T, U>(slice: &[T], f: impl FnMut(&T) -> Option<U>) -> Optio
 
 pub fn first_non_zero<T: Clone + Default + PartialEq>(values: &[T]) -> T {
     let zero = T::default();
-    for value in values {
-        if *value != zero {
-            return value.clone();
-        }
+    if let Some(result) = values.iter().find_map(|value| if *value != zero { Some(value.clone()) } else { None }) {
+        return result;
     }
     zero
 }
@@ -227,9 +212,10 @@ pub fn insert_sorted<T>(slice: &mut Vec<T>, element: T, mut cmp: impl FnMut(&T, 
         Ok(i) => {
             // slices.BinarySearchFunc returns the first matching position.
             let mut i = i;
-            while i > 0 && cmp(&slice[i - 1], &element) == Ordering::Equal {
-                i -= 1;
-            }
+            i -= (0..i)
+                .rev()
+                .take_while(|&i| cmp(&slice[i], &element) == Ordering::Equal)
+                .count();
             i
         }
         Err(i) => i,
@@ -384,8 +370,8 @@ pub fn utf16_len(s: &str) -> UTF16Offset {
         return s.len() as UTF16Offset;
     }
     let bytes = s.as_bytes();
-    for i in 0..bytes.len() {
-        if bytes[i] >= 0x80 {
+    for (i, &byte) in bytes.iter().enumerate() {
+        if byte >= 0x80 {
             // Found non-ASCII; count the ASCII prefix, then decode the rest.
             let mut n = i as UTF16Offset;
             let mut j = i;
@@ -402,9 +388,7 @@ pub fn utf16_len(s: &str) -> UTF16Offset {
 
 pub fn flatten<T: Clone>(array: &[Vec<T>]) -> Vec<T> {
     let mut result = Vec::new();
-    for sub_array in array {
-        result.extend_from_slice(sub_array);
-    }
+    result.extend(array.iter().flat_map(|sub_array| sub_array.iter().cloned()));
     result
 }
 
@@ -577,9 +561,7 @@ fn levenshtein_with_max(
         let max_j = ((max_value + i as f64).floor() as i64).min(s2.len() as i64).max(0) as usize;
         let mut col_min = i as f64;
         current[0] = col_min;
-        for j in 1..min_j.min(buffer_size) {
-            current[j] = big;
-        }
+        current.iter_mut().take(min_j.min(buffer_size)).skip(1).for_each(|value| *value = big);
         for j in min_j..=max_j {
             let substitution_distance = if stringutil::unicode_to_lower(s1[i - 1]) == stringutil::unicode_to_lower(s2[j - 1]) {
                 previous[j - 1] + 0.1
@@ -594,9 +576,7 @@ fn levenshtein_with_max(
             current[j] = dist;
             col_min = col_min.min(dist);
         }
-        for j in max_j + 1..=s2.len() {
-            current[j] = big;
-        }
+        current.iter_mut().take(s2.len() + 1).skip(max_j + 1).for_each(|value| *value = big);
         if col_min > max_value {
             // Give up -- everything in this column is > max and it can't get better in future columns.
             buffers.previous = previous;
@@ -695,10 +675,8 @@ pub fn copy_map_into<K: Hash + Eq + Clone, V: Clone>(dst: Option<FxHashMap<K, V>
     match dst {
         None => src.clone(),
         Some(mut dst) => {
-            #[expect(clippy::iter_over_hash_type, reason = "inserts distinct keys into a map")]
-            for (k, v) in src {
-                dst.insert(k.clone(), v.clone());
-            }
+            // inserts distinct keys into a map
+            dst.extend(src.iter().map(|(k, v)| (k.clone(), v.clone())));
             dst
         }
     }
@@ -748,14 +726,16 @@ pub fn deduplicate_sorted<T: Clone>(slice: &[T], mut is_equal: impl FnMut(&T, &T
     }
     let mut last = &slice[0];
     let mut deduplicated = vec![slice[0].clone()];
-    for next in &slice[1..] {
+    deduplicated = slice[1..].iter().fold(deduplicated, |mut deduplicated, next| {
         if is_equal(last, next) {
-            continue;
+            return deduplicated;
         }
 
         deduplicated.push(next.clone());
         last = next;
-    }
+
+        deduplicated
+    });
 
     deduplicated
 }

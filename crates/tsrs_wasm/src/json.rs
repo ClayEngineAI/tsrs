@@ -50,23 +50,21 @@ fn source_lines(file: &SourceFile, first_line: usize, last_line: usize) -> Optio
     };
     let text = file.text();
     let mut result = Vec::with_capacity(lines.len());
-    for line in lines {
+    result.extend(lines.into_iter().map(|line| {
         let start = line_map[line] as usize;
-        let end = if line + 1 < line_map.len() {
+        let end = if (line + 1) < line_map.len() {
             line_map[line + 1] as usize
         } else {
             text.len()
         };
-        result.push(
-            Obj::new()
-                .set(
-                    "line",
-                    num(u32::try_from(line).expect("line number exceeds u32")),
-                )
-                .set("text", Value::String(text[start..end].to_string()))
-                .build(),
-        );
-    }
+        Obj::new()
+            .set(
+                "line",
+                num(u32::try_from(line).expect("line number exceeds u32")),
+            )
+            .set("text", Value::String(text[start..end].to_string()))
+            .build()
+    }));
     Some(Value::Array(result))
 }
 

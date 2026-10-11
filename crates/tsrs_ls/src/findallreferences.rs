@@ -656,22 +656,26 @@ impl LanguageService {
         let mut checker = program.get_type_checker(ctx);
         let checker: &mut Checker = &mut checker;
         let emit_resolver = checker.get_emit_resolver();
-        for &d in entry.definition.as_ref().unwrap().symbol.unwrap().declarations() {
+        if let Some(result) = entry.definition.as_ref().unwrap().symbol.unwrap().declarations().iter().find_map(|&d| {
             if is_definition_visible(emit_resolver, checker, d) {
                 let (file, start_pos) = get_file_and_start_pos_from_declaration(d);
                 let file_name = file.file_name();
                 let (lsp_position, fidelity) = self.converters.to_lsp_position(&file, start_pos);
                 if fidelity.is_none() {
-                    continue;
+                    return None;
                 }
-                return Some(nonLocalDefinition {
+                return Some(Some(nonLocalDefinition {
                     position: position { uri: lsconv::file_name_to_document_uri(file_name), pos: lsp_position },
                     file_name: file_name.to_string(),
                     start_pos,
                     source_position: OnceCell::new(),
                     generated_position: OnceCell::new(),
-                });
+                }));
             }
+
+            None
+        }) {
+            return result;
         }
         None
     }
@@ -1216,20 +1220,21 @@ impl LanguageService {
     ) -> Result<lsproto::ImplementationResponse, lsproto::Error> {
         let mut seen_nodes: FxHashSet<Option<P<Node>>> = FxHashSet::default();
         let mut entries: Vec<Rc<ReferenceEntry>> = Vec::new();
-        for entry in &data.symbols_and_entries {
-            for r in &entry.references {
-                if seen_nodes.insert(r.node)
-                    && (!options.drop_origin_nodes
-                        || !r
-                            .node
-                            .unwrap()
-                            .loc()
-                            .contains_inclusive(data.position.into()))
-                {
-                    entries.push(Rc::clone(r));
-                }
-            }
-        }
+        entries.extend(
+            data.symbols_and_entries
+                .iter()
+                .flat_map(|entry| &entry.references)
+                .filter(|r| {
+                    seen_nodes.insert(r.node)
+                        && (!options.drop_origin_nodes
+                            || !r
+                                .node
+                                .unwrap()
+                                .loc()
+                                .contains_inclusive(data.position.into()))
+                })
+                .map(Rc::clone),
+        );
 
         if !options.require_locations_result && lsproto::get_client_capabilities(ctx).text_document.implementation.link_support {
             let links = self.convert_entries_to_location_links(&entries, Feature::Implementation);
@@ -1284,21 +1289,19 @@ impl LanguageService {
     // findallreferences.go:1105
     pub(crate) fn convert_entries_to_locations(&self, entries: &[Rc<ReferenceEntry>], feature: Feature) -> Vec<lsproto::Location> {
         let mut locations: Vec<lsproto::Location> = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if let Some(location) = self.get_location_of_entry_for_feature(entry, feature) {
-                locations.push(location);
-            }
-        }
+        locations.extend(
+            entries.iter().filter_map(|entry| if let Some(location) = self.get_location_of_entry_for_feature(entry, feature) { Some(location) } else { None }),
+        );
         locations
     }
 
     // findallreferences.go:1116
     pub(crate) fn convert_entries_to_location_links(&self, entries: &[Rc<ReferenceEntry>], feature: Feature) -> Vec<lsproto::LocationLink> {
         let mut links: Vec<lsproto::LocationLink> = Vec::with_capacity(entries.len());
-        for entry in entries {
+        links.extend(entries.iter().filter_map(|entry| {
             // Get the selection range (the actual reference)
             let Some(loc) = self.get_location_of_entry_for_feature(entry, feature) else {
-                continue;
+                return None;
             };
             let target_selection_range = loc.range;
             let mut target_range = target_selection_range;
@@ -1308,20 +1311,21 @@ impl LanguageService {
                 // Get the context range (broader scope including declaration context)
                 let context_text_range = to_context_range(entry.text_range.get(), entry.source_file.get().unwrap(), entry.context);
                 if let Some(context_text_range) = context_text_range {
-                    let (context_location, fidelity) = self.source_file_range_to_lsp_location_for_feature(entry.source_file.get().unwrap(), context_text_range, feature);
+                    let (context_location, fidelity) =
+                        self.source_file_range_to_lsp_location_for_feature(entry.source_file.get().unwrap(), context_text_range, feature);
                     if !fidelity.is_none() && context_location.uri == loc.uri {
                         target_range = context_location.range;
                     }
                 }
             }
 
-            links.push(lsproto::LocationLink {
+            Some(lsproto::LocationLink {
                 target_uri: lsconv::file_name_to_document_uri(entry.source_file.get().unwrap().original_file_name()),
                 target_range,
                 target_selection_range,
                 ..Default::default()
-            });
-        }
+            })
+        }));
         links
     }
 
@@ -1439,27 +1443,24 @@ impl LanguageService {
         // Collect all declaration name nodes for the target symbol so we can
         // filter them out — the caller wants usages, not declarations.
         let mut decl_names: FxHashSet<P<Node>> = FxHashSet::default();
-        for entry in &entries {
-            if let Some(symbol) = entry.definition.as_ref().and_then(|d| d.symbol) {
-                for &decl in symbol.declarations() {
-                    if let Some(n) = decl.name() {
-                        decl_names.insert(n);
-                    }
-                }
-            }
-        }
+        decl_names.extend(
+            entries
+                .iter()
+                .filter_map(|entry| entry.definition.as_ref().and_then(|d| d.symbol))
+                .flat_map(|symbol| symbol.declarations().iter().filter_map(|decl| decl.name())),
+        );
 
         let mut result: Vec<SignatureUsage> = Vec::new();
         for entry in &entries {
-            for r in entry.references() {
+            result.extend(entry.references().iter().filter_map(|r| {
                 if !r.is_node_entry() {
-                    continue;
+                    return None;
                 }
                 let Some(node) = r.node() else {
-                    continue;
+                    return None;
                 };
                 if decl_names.contains(&node) {
-                    continue;
+                    return None;
                 }
 
                 let called = ast::climb_past_property_access(node);
@@ -1471,8 +1472,8 @@ impl LanguageService {
                     }
                 }
 
-                result.push(SignatureUsage { name: node, call: call_expr });
-            }
+                Some(SignatureUsage { name: node, call: call_expr })
+            }));
         }
         result
     }
@@ -1492,9 +1493,7 @@ impl LanguageService {
         let mut node = node;
         // !!! cancellationToken
         let mut source_files_set: Set<String> = new_set_with_size_hint(source_files.len());
-        for file in source_files {
-            source_files_set.add(file.file_name().to_string());
-        }
+        source_files_set.m.extend(source_files.iter().map(|file| file.file_name().to_string()));
 
         if options.use_ == ReferenceUse::References || options.use_ == ReferenceUse::Rename {
             node = get_adjusted_location(node, options.use_ == ReferenceUse::Rename, ast::get_source_file_of_node(node));
@@ -1605,21 +1604,25 @@ impl LanguageService {
                 continue;
             }
             let possible_references = get_possible_symbol_reference_nodes(source_file, node.text(), None /*container*/);
-            for r in possible_references {
+            references.extend(possible_references.into_iter().filter_map(|r| {
                 if ast::is_string_literal_like(r) && r.text() == node.text() {
                     if let Some(t) = t {
                         let ref_type = get_contextual_type_from_parent_or_ancestor_type_node(r, checker);
                         if t != checker.get_string_type() && (Some(t) == ref_type || is_string_literal_property_reference(r, checker)) {
-                            references.push(new_node_entry_with_kind(r, EntryKind::StringLiteral));
+                            Some(new_node_entry_with_kind(r, EntryKind::StringLiteral))
+                        } else {
+                            None
                         }
                     } else {
                         if ast::is_no_substitution_template_literal(r) && !tsrs_printer::range_is_on_single_line(r.loc(), source_file) {
-                            continue;
+                            return None;
                         }
-                        references.push(new_node_entry_with_kind(r, EntryKind::StringLiteral));
+                        Some(new_node_entry_with_kind(r, EntryKind::StringLiteral))
                     }
+                } else {
+                    None
                 }
-            }
+            }));
         }
 
         vec![SymbolAndEntries {
@@ -1807,7 +1810,7 @@ pub(crate) fn get_references_for_this_keyword(this_or_super_keyword: P<Node>, so
     for source_file in files_to_search {
         // cancellationToken.throwIfCancellationRequested();
         let container = if search_space_node.kind() == Kind::SourceFile { source_file.as_node() } else { search_space_node };
-        for node in get_possible_symbol_reference_nodes(source_file, "this", Some(container)) {
+        references.extend(get_possible_symbol_reference_nodes(source_file, "this", Some(container)).into_iter().filter_map(|node| {
             let keep = (|| {
                 if !is_this(node) {
                     return false;
@@ -1834,10 +1837,8 @@ pub(crate) fn get_references_for_this_keyword(this_or_super_keyword: P<Node>, so
                     _ => false,
                 }
             })();
-            if keep {
-                references.push(new_node_entry(node));
-            }
-        }
+            if keep { Some(new_node_entry(node)) } else { None }
+        }));
     }
 
     let this_parameter = references.iter().find_map(|r| {
@@ -1899,14 +1900,12 @@ pub(crate) fn get_references_for_super_keyword(super_keyword: P<Node>) -> Option
 // findallreferences.go:1604
 pub(crate) fn get_all_references_for_import_meta(source_files: &[P<SourceFile>]) -> Option<Vec<SymbolAndEntries>> {
     let mut references: Vec<Rc<ReferenceEntry>> = Vec::new();
-    for &source_file in source_files {
-        for node in get_possible_symbol_reference_nodes(source_file, "meta", Some(source_file.as_node())) {
+    references.extend(
+        source_files.iter().flat_map(|&source_file| get_possible_symbol_reference_nodes(source_file, "meta", Some(source_file.as_node()))).filter_map(|node| {
             let parent = node.parent().unwrap();
-            if ast::is_import_meta(parent) {
-                references.push(new_node_entry(parent));
-            }
-        }
-    }
+            ast::is_import_meta(parent).then(|| new_node_entry(parent))
+        }),
+    );
     if references.is_empty() {
         return None;
     }
@@ -1921,14 +1920,18 @@ pub(crate) fn get_all_references_for_import_meta(source_files: &[P<SourceFile>])
 pub(crate) fn get_all_references_for_keyword(source_files: &[P<SourceFile>], keyword_kind: Kind, filter_read_only_type_operator: bool) -> Option<Vec<SymbolAndEntries>> {
     // references is a list of NodeEntry
     let mut references: Vec<Rc<ReferenceEntry>> = Vec::new();
-    for &source_file in source_files {
-        // cancellationToken.throwIfCancellationRequested();
-        for reference_location in get_possible_symbol_reference_nodes(source_file, scanner::token_to_string(keyword_kind), Some(source_file.as_node())) {
-            if reference_location.kind() == keyword_kind && (!filter_read_only_type_operator || is_readonly_type_operator(reference_location)) {
-                references.push(new_node_entry(reference_location));
-            }
-        }
-    }
+    references.extend(
+        source_files
+            .iter()
+            .flat_map(|&source_file| {
+                // cancellationToken.throwIfCancellationRequested();
+                get_possible_symbol_reference_nodes(source_file, scanner::token_to_string(keyword_kind), Some(source_file.as_node()))
+            })
+            .filter(|&reference_location| {
+                reference_location.kind() == keyword_kind && (!filter_read_only_type_operator || is_readonly_type_operator(reference_location))
+            })
+            .map(new_node_entry),
+    );
     if references.is_empty() {
         return None;
     }
@@ -1954,9 +1957,7 @@ pub(crate) fn get_possible_symbol_reference_nodes(source_file: P<SourceFile>, sy
 // continuation byte (the needle is valid UTF-8), so searching from the next char boundary finds the same index.
 fn index_from(text: &str, start: usize, needle: &str) -> Option<usize> {
     let mut boundary = start;
-    while boundary < text.len() && !text.is_char_boundary(boundary) {
-        boundary += 1;
-    }
+    boundary += (boundary..text.len()).take_while(|&index| !text.is_char_boundary(index)).count();
     text[boundary..].find(needle).map(|i| i + boundary - start)
 }
 
@@ -2137,29 +2138,31 @@ impl LanguageService {
 
         // Add references to the module declarations themselves
         if !symbol.declarations().is_empty() {
-            for &decl in symbol.declarations() {
+            references.extend(symbol.declarations().iter().filter_map(|&decl| {
                 match decl.kind() {
                     Kind::SourceFile => {
                         // Don't include the source file itself. (This may not be ideal behavior, but awkward to include an entire file as a reference.)
-                        continue;
+                        None
                     }
                     Kind::ModuleDeclaration => {
                         if source_files_set.has(&ast::get_source_file_of_node(decl).unwrap().file_name().to_string()) {
-                            references.push(new_node_entry(decl.name().unwrap()));
+                            Some(new_node_entry(decl.name().unwrap()))
+                        } else {
+                            None
                         }
                     }
                     _ => {
                         // This may be merged with something (e.g. a class merged with a namespace).
-                        continue;
+                        None
                     }
                 }
-            }
+            }));
         }
 
         // Handle export equals declarations
         let exported = symbol.exports().and_then(|exports| exports.lookup(ast::InternalSymbolNameExportEquals));
         if let Some(exported) = exported {
-            for &decl in exported.declarations() {
+            references.extend(exported.declarations().iter().filter_map(|&decl| {
                 let source_file = ast::get_source_file_of_node(decl).unwrap();
                 if source_files_set.has(&source_file.file_name().to_string()) {
                     let node: P<Node>;
@@ -2174,9 +2177,11 @@ impl LanguageService {
                     } else {
                         node = ast::get_name_of_declaration(Some(decl)).unwrap_or(decl);
                     }
-                    references.push(new_node_entry(node));
+                    Some(new_node_entry(node))
+                } else {
+                    None
                 }
-            }
+            }));
         }
 
         if !references.is_empty() {
@@ -2636,11 +2641,13 @@ impl<'a> RefState<'a> {
     pub(crate) fn mark_searched_symbols(&mut self, source_file: P<SourceFile>, symbols: &[P<Symbol>]) -> bool {
         let seen_symbols = self.source_file_to_seen_symbols.entry(source_file).or_default();
         let mut any_new_symbols = false;
-        for &sym in symbols {
+        any_new_symbols = symbols.iter().fold(any_new_symbols, |mut any_new_symbols, &sym| {
             if seen_symbols.insert(sym) {
                 any_new_symbols = true;
             }
-        }
+
+            any_new_symbols
+        });
         any_new_symbols
     }
 
@@ -3086,9 +3093,9 @@ impl<'a> RefState<'a> {
         // If the symbol is an instantiation from a another symbol (e.g. widened symbol):
         //   - In populateSearchSymbolsSet, add the root the list
         //   - In findRelatedSymbol, return the source symbol if that is in the search. (Do not return the instantiation symbol.)
-        for root_symbol in self.checker.get_root_symbols(sym) {
+        if let Some(result) = self.checker.get_root_symbols(sym).into_iter().find_map(|root_symbol| {
             if let Some(result) = cb_symbol(sym, Some(root_symbol), None /*baseSymbol*/) {
-                return Some(result);
+                return Some(Some(result));
             }
             // Add symbol of properties/methods of the same name in base classes and implemented interfaces definitions
             if let Some(root_parent) = root_symbol.parent() {
@@ -3097,10 +3104,14 @@ impl<'a> RefState<'a> {
                         cb_symbol(sym, Some(root_symbol), Some(base))
                     });
                     if result.is_some() {
-                        return result;
+                        return Some(result);
                     }
                 }
             }
+
+            None
+        }) {
+            return result;
         }
         None
     }
@@ -3139,11 +3150,16 @@ impl<'a> RefState<'a> {
             // to get a contextual type for it, and add the property symbol from the contextual
             // type to the search set
             if let Some(contextual_type) = self.checker.get_contextual_type_exported(containing_object_literal_element.parent().unwrap(), ContextFlags::None) {
-                let symbols = self.checker.get_property_symbols_from_contextual_type(containing_object_literal_element, contextual_type, true /*unionSymbolOk*/);
-                for sym in symbols {
+                let symbols =
+                    self.checker.get_property_symbols_from_contextual_type(containing_object_literal_element, contextual_type, true /*unionSymbolOk*/);
+                if let Some(result) = symbols.into_iter().find_map(|sym| {
                     if let Some(res) = self.from_root(cb_symbol, allow_base_types, sym) {
-                        return (Some(res), EntryKind::SearchedPropertyFoundLocal);
+                        return Some((Some(res), EntryKind::SearchedPropertyFoundLocal));
                     }
+
+                    None
+                }) {
+                    return result;
                 }
             }
             // If the location is name of property symbol from object literal destructuring pattern

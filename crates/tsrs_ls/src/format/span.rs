@@ -158,6 +158,7 @@ pub(crate) fn prepare_range_contains_error_function(errors: &[P<Diagnostic>], or
     Box::new(move |r: TextRange| -> bool {
         // in current implementation sequence of arguments [r1, r2...] is monotonically increasing.
         // 'index' tracks the index of the most recent error that was checked.
+        // Keep it across calls so earlier diagnostics are not scanned again (notes/perf-iterator-regressions.md).
         loop {
             if index >= sorted.len() {
                 // all errors in the range were already checked -> no error in specified range
@@ -717,8 +718,7 @@ impl FormatSpanWorker {
         }
 
         let mut inherited_indentation = None;
-        for i in 0..nodes.nodes().len() {
-            let child = nodes.nodes()[i];
+        for (i, &child) in nodes.nodes().iter().enumerate() {
             inherited_indentation = self.process_child_node(
                 node,
                 indenter.cloned(),
@@ -1555,12 +1555,14 @@ impl FormatSpanWorker {
                 .count(),
         );
         let mut start_pos = comment_start;
-        for line in start_line..end_line {
+        parts = (start_line..end_line).fold(parts, |mut parts, line| {
             let end_of_line = scanner::get_ecma_end_line_position(self.source_file, line)
                 .unwrap_or(text.len() as u32);
             parts.push(TextRange::new(start_pos, end_of_line));
             start_pos = scanner::get_ecma_line_starts(self.source_file.get())[line + 1];
-        }
+
+            parts
+        });
 
         if indent_final_line {
             parts.push(TextRange::new(start_pos, comment_end));
@@ -1591,17 +1593,17 @@ impl FormatSpanWorker {
 
         // shift all parts on the delta size
         let delta = indentation - non_whitespace_in_first_part_column;
-        for i in start_index..parts.len() {
+        for (i, element) in parts.iter().enumerate().skip(start_index) {
             let start_line_pos = scanner::get_ecma_line_starts(self.source_file.get())[start_line];
             let mut non_whitespace_character = non_whitespace_in_first_part_character;
             let mut non_whitespace_column = non_whitespace_in_first_part_column;
             if i != 0 {
                 (non_whitespace_character, non_whitespace_column) =
                     find_first_non_whitespace_character_and_column(
-                        parts[i]
+                        (*element)
                             .pos()
                             .expect_source("comment ranges have source positions"),
-                        parts[i]
+                        (*element)
                             .end()
                             .expect_source("comment ranges have source positions"),
                         self.source_file,
@@ -1767,14 +1769,15 @@ impl FormatSpanWorker {
             // processed by processTrivia (which skips comments not contained by originalRange).
             // Cap previousRangeTriviaEnd before such comments so the trailing edit contiguity
             // check in execute() won't pair across unprocessed comment content.
-            for trivia in &current_token_info.trailing_trivia {
-                if is_comment(trivia.kind) && !trivia.loc.contained_by(self.original_range) {
-                    self.previous_range_trivia_end = trivia
-                        .loc
-                        .pos()
-                        .expect_source("formatting ranges have source positions");
-                    break;
-                }
+            if let Some(trivia) = current_token_info
+                .trailing_trivia
+                .iter()
+                .find_map(|trivia| if is_comment(trivia.kind) && !trivia.loc.contained_by(self.original_range) { Some(trivia) } else { None })
+            {
+                self.previous_range_trivia_end = trivia
+                    .loc
+                    .pos()
+                    .expect_source("formatting ranges have source positions");
             }
             self.process_trivia(&current_token_info.trailing_trivia, Some(parent), self.child_context_node, Some(dynamic_indenation));
         }

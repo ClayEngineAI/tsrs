@@ -29,7 +29,7 @@ fn parse_jsdoc_for_node(source_file: &'static SourceFile, node: P<Node>) -> Vec<
     let mut pos = node
         .pos()
         .expect_source("parsed nodes have source positions");
-    for comment in &ranges {
+    jsdoc = ranges.iter().fold(jsdoc, |mut jsdoc, comment| {
         if let Some(parsed) = p.parse_jsdoc_comment(node, comment.pos(), comment.end(), pos) {
             parsed.set_parent(Some(node));
             jsdoc.push(parsed);
@@ -37,7 +37,9 @@ fn parse_jsdoc_for_node(source_file: &'static SourceFile, node: P<Node>) -> Vec<
                 .end()
                 .expect_source("parsed nodes have source positions");
         }
-    }
+
+        jsdoc
+    });
     jsdoc
 }
 
@@ -92,7 +94,7 @@ impl Parser {
         let mut pos = node
             .pos()
             .expect_source("parsed nodes have source positions");
-        for comment in &ranges {
+        jsdoc = ranges.iter().fold(jsdoc, |mut jsdoc, comment| {
             if let Some(parsed) = self.parse_jsdoc_comment(node, comment.pos(), comment.end(), pos) {
                 parsed.set_parent(Some(node));
                 jsdoc.push(parsed);
@@ -100,7 +102,9 @@ impl Parser {
                     .end()
                     .expect_source("parsed nodes have source positions");
             }
-        }
+
+            jsdoc
+        });
         if !jsdoc.is_empty() {
             if !node.flags().intersects(NodeFlags::HasJSDoc) {
                 node.set_flags(node.flags() | NodeFlags::HasJSDoc);
@@ -1629,9 +1633,7 @@ impl Parser {
 
 fn remove_leading_newlines(comments: &mut Vec<&'static str>) {
     let mut i = 0;
-    while i < comments.len() && comments[i].trim_start_matches(['\r', '\n']).is_empty() {
-        i += 1;
-    }
+    i += (i..comments.len()).take_while(|&i| comments[i].trim_start_matches(['\r', '\n']).is_empty()).count();
     comments.drain(..i);
 }
 
@@ -1641,12 +1643,12 @@ fn trim_end(s: &str) -> &str {
 
 fn remove_trailing_whitespace(comments: &mut Vec<&'static str>) {
     let mut end = comments.len();
-    for i in (0..comments.len()).rev() {
-        let trimmed = trim_end(comments[i]);
+    for (i, element) in comments.iter_mut().enumerate().rev() {
+        let trimmed = trim_end(*element);
         if trimmed.is_empty() {
             end = i;
         } else {
-            comments[i] = trimmed;
+            (*element) = trimmed;
             break;
         }
     }

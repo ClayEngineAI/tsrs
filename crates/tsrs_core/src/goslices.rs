@@ -379,9 +379,9 @@ fn partial_insertion_sort_cmp_func<E>(
     const SHORTEST_SHIFTING: usize = 50;
     let mut i = a + 1;
     for _ in 0..MAX_STEPS {
-        while i < b && !(cmp(&data[i], &data[i - 1]) == Ordering::Less) {
-            i += 1;
-        }
+        i += (i..b)
+            .take_while(|&index| !(cmp(&data[index], &data[index - 1]) == Ordering::Less))
+            .count();
 
         if i == b {
             return true;
@@ -563,9 +563,11 @@ mod tests {
             sort_func(&mut v, |a, b| a.0.cmp(&b.0));
             assert!(v.windows(2).all(|w| w[0].0 <= w[1].0));
             let mut h = 1469598103934665603u64;
-            for e in &v {
+            h = v.iter().fold(h, |mut h, e| {
                 h = (h ^ e.1 as u64).wrapping_mul(1099511628211);
-            }
+
+                h
+            });
             assert_eq!(h, want, "n = {n}");
         }
     }

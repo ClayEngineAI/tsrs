@@ -625,9 +625,11 @@ impl TestHost {
         let pos = u32::try_from(MAIN.find(needle).unwrap())
             .expect("test source fits in a source position");
         let mut node = tsrs_astnav::get_touching_property_name(sf, pos);
-        for _ in 0..levels {
+        node = (0..levels).fold(node, |mut node, _| {
             node = node.parent().unwrap();
-        }
+
+            node
+        });
         self.node_handle(node).unwrap()
     }
 

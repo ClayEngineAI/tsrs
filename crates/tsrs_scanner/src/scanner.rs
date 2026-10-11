@@ -292,12 +292,8 @@ fn text_to_token() -> &'static FxHashMap<&'static str, Kind> {
     static M: OnceLock<FxHashMap<&'static str, Kind>> = OnceLock::new();
     M.get_or_init(|| {
         let mut m = FxHashMap::default();
-        for &(text, kind) in TEXT_TO_PUNCTUATION {
-            m.insert(text, kind);
-        }
-        for &(text, kind) in TEXT_TO_KEYWORD {
-            m.insert(text, kind);
-        }
+        m.extend(TEXT_TO_PUNCTUATION.iter().map(|&(text, kind)| (text, kind)));
+        m.extend(TEXT_TO_KEYWORD.iter().map(|&(text, kind)| (text, kind)));
         m
     })
 }
@@ -2825,18 +2821,18 @@ fn parse_int_64(s: &str, base: u32) -> i64 {
 // hasJSDocTag reports whether text starts with one of the given tag names followed
 // by a valid JSDoc tag terminator (whitespace, '}', '*', or end-of-string).
 fn has_jsdoc_tag(text: &[u8], tags: &[&str]) -> bool {
-    for tag in tags {
+    if tags.iter().any(|tag| {
         let tag = tag.as_bytes();
         if !text.starts_with(tag) {
-            continue;
+            return false;
         }
         if text.len() == tag.len() {
             return true;
         }
         let ch = text[tag.len()];
-        if ch == b' ' || ch == b'\t' || ch == b'\n' || ch == b'\r' || ch == b'}' || ch == b'*' {
-            return true;
-        }
+        ch == b' ' || ch == b'\t' || ch == b'\n' || ch == b'\r' || ch == b'}' || ch == b'*'
+    }) {
+        return true;
     }
     false
 }
@@ -2857,12 +2853,7 @@ pub fn is_valid_identifier(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    for (i, ch) in s.char_indices() {
-        if i == 0 && !is_identifier_start(ch as Rune) || i != 0 && !is_identifier_part(ch as Rune) {
-            return false;
-        }
-    }
-    true
+    !(s.char_indices().into_iter().any(|(i, ch)| i == 0 && !is_identifier_start(ch as Rune) || i != 0 && !is_identifier_part(ch as Rune)))
 }
 
 // Section 6.1.4
@@ -2913,11 +2904,7 @@ pub fn string_to_token(s: &str) -> Kind {
 
 pub fn get_viable_keyword_suggestions() -> Vec<&'static str> {
     let mut result = Vec::with_capacity(TEXT_TO_KEYWORD.len());
-    for &(text, _) in TEXT_TO_KEYWORD {
-        if text.len() > 2 {
-            result.push(text);
-        }
-    }
+    result.extend(TEXT_TO_KEYWORD.iter().filter_map(|&(text, _)| if text.len() > 2 { Some(text) } else { None }));
     result
 }
 
@@ -3049,10 +3036,8 @@ pub(crate) fn is_conflict_marker_trivia(text: &str, pos: u32) -> bool {
         let ch = bytes[pos as usize];
 
         if (pos + MERGE_CONFLICT_MARKER_LENGTH) < len {
-            for i in 0..MERGE_CONFLICT_MARKER_LENGTH {
-                if bytes[(pos + i) as usize] != ch {
-                    return false;
-                }
+            if (0..MERGE_CONFLICT_MARKER_LENGTH).any(|i| bytes[(pos + i) as usize] != ch) {
+                return false;
             }
 
             return ch == b'=' || bytes[(pos + MERGE_CONFLICT_MARKER_LENGTH) as usize] == b' ';

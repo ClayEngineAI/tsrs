@@ -31,24 +31,18 @@ struct PositionMapEntry {
 pub fn compute_position_map(text: &str) -> PositionMap {
     let mut pm = PositionMap::default();
     let mut delta = 0u32;
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b < 0x80 {
-            i += 1;
-            continue;
+    pm.entries.extend(text.char_indices().filter_map(|(i, r)| {
+        if r.is_ascii() {
+            return None;
         }
-        let r = text[i..].chars().next().unwrap();
         let size = r.len_utf8();
         let utf16_size = if r as u32 >= 0x10000 { 2 } else { 1 };
         delta += u32::try_from(size).expect("UTF-8 character length exceeds u32") - utf16_size;
-        pm.entries.push(PositionMapEntry {
+        Some(PositionMapEntry {
             utf8_pos: u32::try_from(i + size).expect("source position exceeds u32"),
             delta,
-        });
-        i += size;
-    }
+        })
+    }));
     pm.ascii_only = pm.entries.is_empty();
     pm
 }
