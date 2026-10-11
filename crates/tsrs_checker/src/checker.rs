@@ -1164,6 +1164,9 @@ pub struct Checker {
     pub reg_exp_scanner: Option<Box<Scanner>>,
     pub pattern_for_type: FxHashMap<P<Type>, P<Node>>,
     pub(crate) lazy_member_tables: crate::basedmap::Based<FxHashMap<P<Type>, P<LazyMemberTable>>, P<Type>>,
+    /// Per generic target, what `prepare_lazy_members` learned about its declared members for good
+    /// (`lazy_unaffected_members`).
+    pub(crate) lazy_unaffected: FxHashMap<P<Type>, crate::checker_09::LazyUnaffected>,
     // Go `StructuredType.objectTypeWithoutAbstractConstructSignatures`: set only by the node builder, for few types,
     // so kept here instead of in every object, union and intersection type.
     pub(crate) object_types_without_abstract_construct_signatures: FxHashMap<P<Type>, P<Type>>,
@@ -1174,6 +1177,9 @@ pub struct Checker {
     pub(crate) lazy_mapped_tables: crate::basedmap::Based<FxHashMap<P<Type>, std::rc::Rc<LazyMappedTable>>, P<Type>>,
     /// tsrs_core::lazymembers::enabled() (default on; `--noLazyMembers` / `TSRS_LAZY_MEMBERS=0`): no lazy table is created when false.
     pub lazy_members: bool,
+    /// `TSRS_DEEP_NESTED=shadow`: every deeply-nested test on a relater stack is also made without the stack's kept
+    /// recursion identities, and the kept identities are recomputed; any difference panics (relater_1.rs).
+    pub(crate) deep_nested_shadow: bool,
     /// notes/mem-lazy.md L1: tuple references get lazy member tables too.
     pub lazy_tuples: bool,
     /// site-counts profile: creation site of each instantiated symbol until its type is resolved.
@@ -1195,6 +1201,8 @@ pub struct Checker {
     pub(crate) augment_filter: Option<tsrs_ast::NameFilter>,
     /// Reused buffers for `get_unmatched_property_recording` (relater_1.rs), one per nested `propertiesRelatedTo`.
     pub(crate) unmatched_found_pool: Vec<Vec<Option<Option<P<Symbol>>>>>,
+    /// Reused buffers for `some_property_reduces_to_never` (checker_11.rs), one per nested call.
+    pub(crate) name_counts_pool: Vec<crate::checker_11::NameCounts>,
     /// `contextual_property_type_of_large_union` (checker_15.rs): per (union, name hash), the name, the
     /// `members_reset_epoch` it was computed in and the positions of the constituents that can contribute.
     pub(crate) contextual_relevant: FxHashMap<(P<Type>, u32), Vec<(&'static str, u32, std::rc::Rc<[u32]>)>>,
@@ -1416,6 +1424,8 @@ pub struct Checker {
     pub scratch_mapper_lists: Vec<(P<TypeMapper>, &'static [P<Type>])>,
     pub free_type_mapper_caches: Vec<PackedMap<CacheHashKey, P<Type>>>, // Rust-only: cleared maps for reuse (Go keeps them in the slice capacity)
     pub free_type_lists: Vec<Vec<P<Type>>>, // Rust-only: empty buffers for `instantiate_types_changed`
+    pub free_strings: Vec<String>, // Rust-only: empty buffers for text built and dropped in one call
+    pub free_name_sets: Vec<FxHashSet<&'static str>>, // Rust-only: empty sets for names seen during one walk
     pub ambient_modules_once: bool, // Go sync.Once: true once ambient_modules has been computed
     pub ambient_modules: Vec<P<Symbol>>,
     pub within_unreachable_code: bool,
@@ -1598,11 +1608,13 @@ pub fn new_checker(program: &'static dyn Program) -> Box<Checker> {
         reg_exp_scanner: None,
         pattern_for_type: FxHashMap::default(),
         lazy_member_tables: Default::default(),
+        lazy_unaffected: FxHashMap::default(),
         object_types_without_abstract_construct_signatures: FxHashMap::default(),
         structured_type_base_constraints: FxHashMap::default(),
         object_type_instantiations: Default::default(),
         lazy_mapped_tables: Default::default(),
         lazy_members: tsrs_core::lazymembers::enabled(),
+        deep_nested_shadow: std::env::var("TSRS_DEEP_NESTED").is_ok_and(|v| v == "shadow"),
         lazy_tuples: tsrs_core::lazymembers::lazy_tuples(),
         #[cfg(feature = "site-counts")]
         inst_symbol_sites: FxHashMap::default(),
@@ -1614,6 +1626,7 @@ pub fn new_checker(program: &'static dyn Program) -> Box<Checker> {
         lazy_member_stats: Default::default(),
         augment_filter: None,
         unmatched_found_pool: Vec::new(),
+        name_counts_pool: Vec::new(),
         contextual_relevant: FxHashMap::default(),
         discriminant_property_types: FxHashMap::default(),
         constituent_flags: FxHashMap::default(),
@@ -1819,6 +1832,8 @@ pub fn new_checker(program: &'static dyn Program) -> Box<Checker> {
         scratch_mapper_lists: Vec::new(),
         free_type_mapper_caches: Vec::new(),
         free_type_lists: Vec::new(),
+        free_strings: Vec::new(),
+        free_name_sets: Vec::new(),
         ambient_modules_once: false,
         ambient_modules: Vec::new(),
         within_unreachable_code: false,
@@ -2091,11 +2106,13 @@ impl Checker {
             reg_exp_scanner: None,
             pattern_for_type: base.pattern_for_type.clone(),
             lazy_member_tables: crate::basedmap::Based::over(&base.lazy_member_tables),
+            lazy_unaffected: FxHashMap::default(),
             object_types_without_abstract_construct_signatures: base.object_types_without_abstract_construct_signatures.clone(),
             structured_type_base_constraints: base.structured_type_base_constraints.clone(),
             object_type_instantiations: crate::basedmap::Based::over(&base.object_type_instantiations),
             lazy_mapped_tables: crate::basedmap::Based::over(&base.lazy_mapped_tables),
             lazy_members: base.lazy_members.clone(),
+            deep_nested_shadow: base.deep_nested_shadow,
             lazy_tuples: base.lazy_tuples.clone(),
             #[cfg(feature = "site-counts")]
             inst_symbol_sites: base.inst_symbol_sites.clone(),
@@ -2107,6 +2124,7 @@ impl Checker {
             lazy_member_stats: base.lazy_member_stats.clone(),
             augment_filter: base.augment_filter.clone(),
             unmatched_found_pool: Vec::new(),
+            name_counts_pool: Vec::new(),
             contextual_relevant: FxHashMap::default(),
             discriminant_property_types: FxHashMap::default(),
             constituent_flags: FxHashMap::default(),
@@ -2312,6 +2330,8 @@ impl Checker {
             scratch_mapper_lists: Vec::new(),
             free_type_mapper_caches: Vec::new(),
             free_type_lists: Vec::new(),
+            free_strings: Vec::new(),
+            free_name_sets: Vec::new(),
             ambient_modules_once: base.ambient_modules_once.clone(),
             ambient_modules: base.ambient_modules.clone(),
             within_unreachable_code: base.within_unreachable_code.clone(),
@@ -2434,9 +2454,12 @@ impl Checker {
         self.compare_types_assignable_worker(source, target, report_errors)
     }
 
-    /// `c.compareTypesAssignable` used as a value (`TypeComparer`).
+    /// `c.compareTypesAssignable` used as a value (`TypeComparer`): a function item, so no arena allocation per call.
     pub(crate) fn compare_types_assignable_comparer(&self) -> TypeComparer {
-        type_comparer(|c, s, t, report_errors| c.compare_types_assignable(s, t, report_errors))
+        fn compare_types_assignable(c: &mut Checker, s: P<Type>, t: P<Type>, report_errors: bool) -> Ternary {
+            c.compare_types_assignable(s, t, report_errors)
+        }
+        &compare_types_assignable
     }
 
     /// The closure built by Go `getGlobalTypesResolver(names, arity, reportErrors)`.

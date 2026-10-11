@@ -856,15 +856,15 @@ impl Relater {
         self.maybe_stack_push(id);
         let save_expanding_flags = self.expanding_flags.get();
         if recursion_flags.intersects(RecursionFlags::Source) {
-            self.source_stack.borrow_mut().push(source);
+            self.source_stack.borrow_mut().push(RelaterStackEntry::new(source));
             // isDeeplyNestedType never reaches this relater, so the stack borrow is not held across a re-entry.
-            if !self.expanding_flags.get().intersects(ExpandingFlags::Source) && c.is_deeply_nested_type(source, &self.source_stack.borrow(), 3) {
+            if !self.expanding_flags.get().intersects(ExpandingFlags::Source) && c.is_deeply_nested_on_stack(source, &self.source_stack.borrow(), 3) {
                 self.expanding_flags.set(self.expanding_flags.get() | ExpandingFlags::Source);
             }
         }
         if recursion_flags.intersects(RecursionFlags::Target) {
-            self.target_stack.borrow_mut().push(target);
-            if !self.expanding_flags.get().intersects(ExpandingFlags::Target) && c.is_deeply_nested_type(target, &self.target_stack.borrow(), 3) {
+            self.target_stack.borrow_mut().push(RelaterStackEntry::new(target));
+            if !self.expanding_flags.get().intersects(ExpandingFlags::Target) && c.is_deeply_nested_on_stack(target, &self.target_stack.borrow(), 3) {
                 self.expanding_flags.set(self.expanding_flags.get() | ExpandingFlags::Target);
             }
         }
@@ -1013,7 +1013,7 @@ impl Relater {
             // the type param can be compared with itself in the target (with the influence of its constraint to match other parts)
             // For example, if `T extends 1 | 2` and `U extends 2 | 3` and we compare `T & U` to `T & U & (1 | 2 | 3)`
             if result == Ternary::False && (source.flags().intersects(TypeFlags::Intersection) || source.flags().intersects(TypeFlags::TypeParameter) && target.flags().intersects(TypeFlags::Union)) {
-                let source_types: Vec<P<Type>> = if source.flags().intersects(TypeFlags::Intersection) { source.types().to_vec() } else { vec![source] };
+                let source_types: &[P<Type>] = if source.flags().intersects(TypeFlags::Intersection) { source.types() } else { std::slice::from_ref(&source) };
                 let constraint = c.get_effective_constraint_of_intersection(&source_types, target.flags().intersects(TypeFlags::Union));
                 if let Some(constraint) = constraint {
                     if every_type(c, constraint, |_, t| t != source) {
@@ -1390,7 +1390,7 @@ impl Relater {
         } else if target.flags().intersects(TypeFlags::Conditional) {
             // If we reach 10 levels of nesting for the same conditional type, assume it is an infinitely expanding recursive
             // conditional type and bail out with a Ternary.Maybe result.
-            if c.is_deeply_nested_type(target, &self.target_stack.borrow(), 10) {
+            if c.is_deeply_nested_on_stack(target, &self.target_stack.borrow(), 10) {
                 return Ternary::Maybe;
             }
             let target_conditional = target.as_conditional_type();
@@ -1598,7 +1598,7 @@ impl Relater {
         } else if source.flags().intersects(TypeFlags::Conditional) {
             // If we reach 10 levels of nesting for the same conditional type, assume it is an infinitely expanding recursive
             // conditional type and bail out with a Ternary.Maybe result.
-            if c.is_deeply_nested_type(source, &self.source_stack.borrow(), 10) {
+            if c.is_deeply_nested_on_stack(source, &self.source_stack.borrow(), 10) {
                 return Ternary::Maybe;
             }
             if target.flags().intersects(TypeFlags::Conditional) {

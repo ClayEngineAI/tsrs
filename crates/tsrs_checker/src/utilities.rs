@@ -485,6 +485,10 @@ impl Checker {
         let Some(n2) = n2 else {
             return Ordering::Less;
         };
+        // Two nodes with one parent are in one file (most comparisons sort the members of one declaration).
+        if n1.parent().is_some() && n1.parent() == n2.parent() && n1.kind() != Kind::SourceFile && n2.kind() != Kind::SourceFile {
+            return n1.pos().cmp(&n2.pos());
+        }
         let (s1, f1) = self.source_file_and_index_of_node(n1);
         let (s2, f2) = self.source_file_and_index_of_node(n2);
         if s1 != s2 {
@@ -1922,7 +1926,7 @@ impl Checker {
             return t.as_intersection_type().types.get().iter().any(|&t| self.is_js_literal_type(t));
         }
         if t.flags().intersects(TypeFlags::Instantiable) {
-            let constraint = self.get_resolved_base_constraint(t, &[]);
+            let constraint = self.get_resolved_base_constraint(t, crate::checker_13::BaseConstraintStack::default());
             return constraint != t && self.is_js_literal_type(constraint);
         }
         false

@@ -621,7 +621,8 @@ fn hash_name(name: &str) -> u32 {
     } else {
         (0, 0)
     };
-    let m = ((x ^ 0x243f_6a88_85a3_08d3) as u128).wrapping_mul((y ^ 0x1319_8a2e_0370_7344 ^ len as u64) as u128);
+    // The two constants are AArch64 logical immediates (one `eor` each, no four-instruction load).
+    let m = ((x ^ 0x5555_5555_5555_5555) as u128).wrapping_mul((y ^ 0x3333_3333_3333_3333 ^ len as u64) as u128);
     let h = (m as u64) ^ ((m >> 64) as u64);
     (h ^ (h >> 32)) as u32
 }
@@ -634,10 +635,37 @@ fn same_text(a: &str, b: &str) -> bool {
     a.len() == b.len() && (std::ptr::eq(a.as_ptr(), b.as_ptr()) || a.as_bytes() == b.as_bytes())
 }
 
-/// The index's hash of an entry: its 32-bit hash spread over 64 bits (hashbrown takes its tag from the top bits).
+/// `a == b` for two strings of the same length of at most 16 bytes, with the loads `hash_name` makes (no call).
+#[inline]
+fn short_text_eq(a: &[u8], b: &[u8]) -> bool {
+    let len = a.len();
+    debug_assert!(len == b.len() && len <= 16);
+    if len >= 8 {
+        a.first_chunk::<8>() == b.first_chunk::<8>() && a.last_chunk::<8>() == b.last_chunk::<8>()
+    } else if len >= 4 {
+        a.first_chunk::<4>() == b.first_chunk::<4>() && a.last_chunk::<4>() == b.last_chunk::<4>()
+    } else {
+        len == 0 || a[0] == b[0] && a[len / 2] == b[len / 2] && a[len - 1] == b[len - 1]
+    }
+}
+
+/// `SymbolMap::key` from the parts it reads (for the index's rehash, which borrows the index).
+#[inline]
+fn key_at(entries: &[SymbolMapEntry], odd_keys: &[(u32, &'static str)], i: usize) -> &'static str {
+    let e = entries[i];
+    if !e.is_odd() {
+        return e.symbol().name();
+    }
+    odd_keys.iter().find(|&&(j, _)| j as usize == i).unwrap().1
+}
+
+/// The index's hash of an entry: hashbrown takes the bucket from the low bits (the name hash's low bits) and its
+/// 7-bit tag from the top bits, here name hash bits 13-19, which neither the bucket of a table below 8192 buckets
+/// nor the entry fingerprint (bits 20-31) uses. One shifted `orr`, no constant to load.
 #[inline]
 fn index_hash(hash: u32) -> u64 {
-    (hash as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    let h = hash as u64;
+    h | h << 44
 }
 
 
@@ -663,8 +691,7 @@ impl SymbolMap {
         if !e.is_odd() {
             return e.symbol().name();
         }
-        let odd_keys = &self.extra.get().unwrap().odd_keys;
-        odd_keys.iter().find(|&&(j, _)| j as usize == i).unwrap().1
+        key_at(&self.entries, &self.extra.get().unwrap().odd_keys, i)
     }
 
     /// Whether entry `i`'s key is `name` (whose fingerprint is `print`).
@@ -696,13 +723,39 @@ impl SymbolMap {
         self.search(name, hash)
     }
 
-    /// `position` past the filter (`hash` = `hash_name(name)`).
+    /// `position` past the filter (`hash` = `hash_name(name)`): the first entry with the key's fingerprint, returned
+    /// at once when its key has the looked-up text and at most 16 bytes; anything else goes to `search_text`. Nearly
+    /// every search ends here (a miss, or a hit on a short name), and without a call on this path the function saves
+    /// no registers.
     #[inline(never)]
     fn search(&self, name: &str, hash: u32) -> Option<usize> {
         let print = KeyPrint::of(name, hash);
+        let i = match self.index() {
+            None => (0..self.entries.len()).find(|&i| self.entries[i].print() == print)?,
+            Some(index) => *index.find(index_hash(hash), |&i| self.entries[i as usize].print() == print)? as usize,
+        };
+        let e = self.entries[i];
+        if !e.is_odd() {
+            let key = e.symbol().name();
+            if key.len() == name.len() && (std::ptr::eq(key.as_ptr(), name.as_ptr()) || name.len() <= 16 && short_text_eq(key.as_bytes(), name.as_bytes())) {
+                return Some(i);
+            }
+        }
+        self.search_text(name, hash, i)
+    }
+
+    /// `search` from candidate `i` (the first entry with the key's fingerprint) on, comparing the text. Keys are
+    /// unique, so a candidate with the same text is the answer; after a fingerprint collision the linear scan goes on
+    /// past `i` and the index is probed again.
+    #[inline(never)]
+    fn search_text(&self, name: &str, hash: u32, i: usize) -> Option<usize> {
+        let print = KeyPrint::of(name, hash);
+        if same_text(self.key(i), name) {
+            return Some(i);
+        }
         match self.index() {
-            None => (0..self.entries.len()).find(|&i| self.entry_matches(i, name, print)),
-            Some(index) => index.find(index_hash(hash), |&i| self.entry_matches(i as usize, name, print)).map(|&i| i as usize),
+            None => (i + 1..self.entries.len()).find(|&j| self.entry_matches(j, name, print)),
+            Some(index) => index.find(index_hash(hash), |&j| self.entry_matches(j as usize, name, print)).map(|&j| j as usize),
         }
     }
 
@@ -736,16 +789,24 @@ impl SymbolMap {
         if !same_text(symbol.name(), name) {
             self.add_odd_key(i, name);
         }
-        let len = self.entries.len();
-        let has_index = self.index().is_some();
-        if has_index || len > SYMBOL_TABLE_LINEAR_MAX {
-            let mut index = self.extra.get_mut().and_then(|e| e.index.take()).unwrap_or_else(|| HashTable::with_capacity(len));
-            let start = if has_index { i } else { 0 };
-            for j in start..len {
-                index.insert_unique(index_hash(self.entry_hash(j)), j as u32, |&m| index_hash(self.entry_hash(m as usize)));
-            }
-            self.extra.get_or_insert().index = Some(index);
+        if let Some(SymbolMapExtra { index: Some(index), odd_keys }) = self.extra.get_mut() {
+            let entries = &self.entries;
+            index.insert_unique(index_hash(hash), i as u32, |&m| index_hash(hash_name(key_at(entries, odd_keys, m as usize))));
+        } else if self.entries.len() > SYMBOL_TABLE_LINEAR_MAX {
+            self.build_index();
         }
+    }
+
+    /// The index of a linear table that has grown past `SYMBOL_TABLE_LINEAR_MAX` entries.
+    #[cold]
+    #[inline(never)]
+    fn build_index(&mut self) {
+        let len = self.entries.len();
+        let mut index = HashTable::with_capacity(len);
+        for j in 0..len {
+            index.insert_unique(index_hash(self.entry_hash(j)), j as u32, |&m| index_hash(self.entry_hash(m as usize)));
+        }
+        self.extra.get_or_insert().index = Some(index);
     }
 
     fn shift_remove(&mut self, name: &str) {

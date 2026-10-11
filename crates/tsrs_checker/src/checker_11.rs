@@ -5,7 +5,7 @@ use tsrs_ast as ast;
 use tsrs_diagnostics as diagnostics;
 use tsrs_diagnostics::Message;
 use rustc_hash::FxHashMap;
-use tsrs_core::collections::{OrderedMap, OrderedSet, OrderedSetExt};
+use tsrs_core::collections::OrderedSet;
 
 // Generated as signature stubs by tools/gosig (checker.json); the bodies have since been ported by hand. Do not re-run
 // gosig into this directory: it rewrites every file listed in checker.json.
@@ -77,7 +77,7 @@ impl Checker {
     pub(crate) fn create_union_or_intersection_property(&mut self, containing_type: P<Type>, name: &str, skip_object_function_property_augment: bool) -> Option<P<Symbol>> {
         let mut prop_flags = SymbolFlags::None;
         let mut single_prop: Option<P<Symbol>> = None;
-        let mut prop_set: OrderedSet<P<Symbol>> = OrderedSet::default();
+        let mut prop_set: orderedSet<P<Symbol>> = orderedSet::default();
         let mut index_types: Vec<P<Type>> = Vec::new();
         let is_union = containing_type.flags().intersects(TypeFlags::Union);
         // Flags we want to propagate to the result if they exist in all source symbols
@@ -125,10 +125,12 @@ impl Checker {
                                 None => false,
                             };
                         } else {
-                            if prop_set.size() == 0 {
+                            if prop_set.values.is_empty() {
                                 prop_set.add(sp);
                             }
-                            prop_set.add(prop);
+                            if !prop_set.contains(prop) {
+                                prop_set.add(prop);
+                            }
                         }
                         // classes created by mixins are represented as intersections
                         // and overriding a property in a derived class redefines it completely at runtime
@@ -191,9 +193,9 @@ impl Checker {
             return None;
         };
         if is_union
-            && (prop_set.size() != 0 || check_flags.intersects(CheckFlags::Partial))
+            && (!prop_set.values.is_empty() || check_flags.intersects(CheckFlags::Partial))
             && check_flags.intersects(CheckFlags::ContainsPrivate | CheckFlags::ContainsProtected | CheckFlags::ContainsWritePrivate | CheckFlags::ContainsWriteProtected)
-            && !(prop_set.size() != 0 && self.has_common_declaration(&prop_set))
+            && !(!prop_set.values.is_empty() && self.has_common_declaration(&prop_set.values))
         {
             // A property in a union has a private or protected declaration in one constituent, but is missing
             // or has a different declaration in another constituent. If the private or protected declaration is
@@ -209,7 +211,7 @@ impl Checker {
                 check_flags &= !CheckFlags::ContainsWritePublic;
             }
         }
-        if prop_set.size() == 0 && !check_flags.intersects(CheckFlags::ReadPartial) && index_types.is_empty() {
+        if prop_set.values.is_empty() && !check_flags.intersects(CheckFlags::ReadPartial) && index_types.is_empty() {
             if !merged_instantiations {
                 return Some(single_prop);
             }
@@ -234,17 +236,18 @@ impl Checker {
             links.set_write_type(write_type);
             return Some(clone);
         }
-        if prop_set.size() == 0 {
+        if prop_set.values.is_empty() {
             prop_set.add(single_prop);
         }
-        let mut declarations: Vec<P<Node>> = Vec::new();
+        let props = prop_set.values;
+        let mut declarations: Vec<P<Node>> = Vec::with_capacity(props.len());
         let mut first_type: Option<P<Type>> = None;
         let mut name_type: Option<P<Type>> = None;
-        let mut prop_types: Vec<P<Type>> = Vec::new();
+        let mut prop_types = self.free_type_lists.pop().unwrap_or_default();
+        prop_types.reserve(props.len() + index_types.len());
         let mut write_types: Option<Vec<P<Type>>> = None;
         let mut first_value_declaration: Option<P<Node>> = None;
         let mut has_non_uniform_value_declaration = false;
-        let props: Vec<P<Symbol>> = prop_set.iter().copied().collect();
         for prop in props {
             if first_value_declaration.is_none() {
                 first_value_declaration = prop.value_declaration();
@@ -293,7 +296,8 @@ impl Checker {
             result.check_flags.set(result.check_flags.get() | CheckFlags::DeferredType);
             let deferred = self.deferred_symbol_links.get(result);
             deferred.parent.set(Some(containing_type));
-            deferred.constituents.set(alloc_vec(prop_types));
+            deferred.constituents.set(alloc_slice(&prop_types));
+            self.free_type_list(prop_types);
             deferred.write_constituents.set(write_types.map_or(&[][..], alloc_vec));
             return Some(result);
         }
@@ -302,6 +306,7 @@ impl Checker {
         } else {
             links.resolved_type.set(Some(self.get_intersection_type(&prop_types)));
         }
+        self.free_type_list(prop_types);
         if let Some(write_types) = write_types {
             if is_union {
                 links.set_write_type(Some(self.get_union_type(&write_types)));
@@ -323,6 +328,48 @@ impl Checker {
     }
 }
 
+/// The occurrence count of each property name over a list of property lists, in first-occurrence order (Go's
+/// `collections.OrderedMap[string, int]` in `somePropertyReducesToNever`).
+#[derive(Default)]
+pub(crate) struct NameCounts {
+    pub(crate) lists: Vec<&'static [P<Symbol>]>,
+    /// (name, name hash, count), in first-occurrence order.
+    pub(crate) entries: Vec<(&'static str, u32, i32)>,
+    /// Open addressing over `entries`: 0 is empty, otherwise an entry index plus one.
+    table: Vec<u32>,
+}
+
+impl NameCounts {
+    fn count_lists(&mut self, total: usize) {
+        self.entries.clear();
+        let size = (total * 2).max(16).next_power_of_two();
+        self.table.clear();
+        self.table.resize(size, 0);
+        let mask = size - 1;
+        for &list in &self.lists {
+            for prop in list {
+                let name = prop.name();
+                let hash = HashedName::new(name).hash();
+                let mut i = hash as usize & mask;
+                loop {
+                    let slot = self.table[i];
+                    if slot == 0 {
+                        self.entries.push((name, hash, 1));
+                        self.table[i] = self.entries.len() as u32;
+                        break;
+                    }
+                    let entry = &mut self.entries[slot as usize - 1];
+                    if entry.1 == hash && (std::ptr::eq(entry.0, name) || entry.0 == name) {
+                        entry.2 += 1;
+                        break;
+                    }
+                    i = (i + 1) & mask;
+                }
+            }
+        }
+    }
+}
+
 /**
  * Return whether this symbol is a member of a prototype somewhere
  * Note that this is not tracked well within the compiler, so the answer may be incorrect.
@@ -334,7 +381,7 @@ pub(crate) fn is_prototype_property(symbol: P<Symbol>) -> bool {
 
 impl Checker {
     // checker.go:22041
-    pub(crate) fn has_common_declaration(&mut self, symbols: &OrderedSet<P<Symbol>>) -> bool {
+    pub(crate) fn has_common_declaration(&mut self, symbols: &[P<Symbol>]) -> bool {
         let mut common_declarations: OrderedSet<P<Node>> = OrderedSet::default();
         for symbol in symbols.iter() {
             let symbol_declarations = symbol.declarations();
@@ -573,39 +620,44 @@ impl Checker {
         } else {
             None
         };
-        let mut counts: OrderedMap<&'static str, usize> = OrderedMap::default();
+        // tsrs: the counts are kept in a pooled `NameCounts` (Go's ordered map, without its per-name allocation and
+        // hashing); every constituent's property list is fetched first, in order, as before.
+        let mut counts = self.name_counts_pool.pop().unwrap_or_default();
+        counts.lists.clear();
+        let mut total = 0;
         for (i, &t) in types.iter().enumerate() {
             if Some(i) != skipped {
-                for prop in self.get_properties_of_type(t) {
-                    *counts.entry(prop.name()).or_insert(0) += 1;
-                }
+                let props = self.get_properties_of_type(t);
+                total += props.len();
+                counts.lists.push(props);
             }
         }
+        counts.count_lists(total);
         if let Some(skipped) = skipped {
             self.lazy_member_stats.some_property_skipped_constituents += 1;
-            for i in 0..counts.len() {
-                let prop_name = *counts.get_index(i).unwrap().0;
+            for i in 0..counts.entries.len() {
+                let prop_name = counts.entries[i].0;
                 if self.get_property_of_type_ex(types[skipped], prop_name, true /*skipObjectFunctionPropertyAugment*/, false /*includeTypeOnlyMembers*/).is_some() {
-                    *counts.get_index_mut(i).unwrap().1 += 1;
+                    counts.entries[i].2 += 1;
                 }
             }
         }
         // Check if any property appears in more than one constituent type and reduces to 'never'.
         // Go in the order the properties were found so the combined properties are created in the same order every time.
-        if counts.into_iter().any(|(prop_name, count)| {
+        let mut result = false;
+        for i in 0..counts.entries.len() {
+            let (prop_name, _, count) = counts.entries[i];
             if count > 1 {
                 if let Some(prop) = self.get_property_of_union_or_intersection_type(t, prop_name, true /*skipObjectFunctionPropertyAugment*/) {
                     if self.is_never_reduced_property(prop) {
-                        return true;
+                        result = true;
+                        break;
                     }
                 }
             }
-
-            false
-        }) {
-            return true;
         }
-        false
+        self.name_counts_pool.push(counts);
+        result
     }
 
     // checker.go:22240
@@ -1207,7 +1259,7 @@ impl Checker {
                     let Some(new_type_arguments) = self.instantiate_types_changed(resolved_type_arguments, m) else {
                         return t;
                     };
-                    let result = self.create_normalized_type_reference(t.target().unwrap(), &new_type_arguments);
+                    let result = self.create_normalized_type_reference(t.object_target().unwrap(), &new_type_arguments);
                     self.free_type_list(new_type_arguments);
                     return result;
                 }
@@ -1316,7 +1368,7 @@ impl Checker {
             // Deferred type reference
             links.resolved_type.get().unwrap()
         } else if t.object_flags().intersects(ObjectFlags::Instantiated) {
-            t.target().unwrap()
+            t.object_target().unwrap()
         } else {
             t
         };
@@ -1531,10 +1583,11 @@ impl Checker {
             // mapper to the type parameters to produce the effective list of type arguments, and compute the
             // instantiation cache key from the type IDs of the type arguments.
             let outer_type_parameters = root.outer_type_parameters.get();
-            // With m1, this is what the composite mapper's Map does.
-            let type_arguments: Vec<P<Type>> = outer_type_parameters
-                .iter()
-                .map(|&tp| match m1 {
+            let mut type_arguments = self.free_type_lists.pop().unwrap_or_default();
+            type_arguments.reserve(outer_type_parameters.len());
+            for &tp in outer_type_parameters {
+                // With m1, this is what the composite mapper's Map does.
+                let mapped = match m1 {
                     Some(m1) => {
                         let t1 = m1.map(self, tp);
                         if t1 != tp {
@@ -1544,8 +1597,9 @@ impl Checker {
                         }
                     }
                     None => mapper.map(self, tp),
-                })
-                .collect();
+                };
+                type_arguments.push(mapped);
+            }
             let key = get_conditional_type_key(&type_arguments, alias, for_constraint);
             let mut result = root.instantiations.get(&key);
             if result.is_none() {
@@ -1623,6 +1677,7 @@ impl Checker {
                     }
                 }
             }
+            self.free_type_list(type_arguments);
             return result.unwrap();
         }
         t

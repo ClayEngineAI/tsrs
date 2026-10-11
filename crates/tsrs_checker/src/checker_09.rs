@@ -647,8 +647,42 @@ pub(crate) fn get_type_alias_instantiation_key(type_arguments: &[P<Type>], alias
     get_type_instantiation_key(type_arguments, alias.into(), false)
 }
 
+/// The tags of `packed_type_list_key`'s families (each family keys its own caches).
+const PACKED_INSTANTIATION_KEY_TAG: u64 = 0x1a5e;
+const PACKED_CONDITIONAL_KEY_TAG: u64 = 0xc0d7;
+
+/// A key for a list of at most three types without an alias, computed without the key builder.
+///
+/// Go hashes the key bytes with xxh3-128 and only compares keys for equality, in caches private to one key family.
+/// This encoding is injective: the high word holds the family tag, `flag`, the length and the third type id; the low
+/// word is a bijective mix of the first two ids xored with a function of the high word. So two packed keys are equal
+/// exactly when their inputs are, and a packed key equals an xxh3 key of a longer or aliased list with the same
+/// 2^-128 odds as two xxh3 keys equal each other. The mix spreads every input bit over the low word, which
+/// `PackedMap` uses as the hash.
+#[inline]
+fn packed_type_list_key(tag: u64, types: &[P<Type>], flag: bool) -> Option<CacheHashKey> {
+    if types.len() > 3 {
+        return None;
+    }
+    let id = |i: usize| types.get(i).map_or(0, |t| u64::from(t.id.0));
+    let hi = tag << 48 | u64::from(flag) << 34 | (types.len() as u64) << 32 | id(2);
+    let y = ((id(0) | id(1) << 32) ^ hi.wrapping_mul(0x9e37_79b9_7f4a_7c15)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    Some(CacheHashKey { hi, lo: y ^ y >> 32 })
+}
+
 // checker.go:17910
+#[inline]
 pub(crate) fn get_type_instantiation_key(type_arguments: &[P<Type>], alias: AliasArg<'_>, single_signature: bool) -> CacheHashKey {
+    if let AliasArg::None = alias {
+        if let Some(key) = packed_type_list_key(PACKED_INSTANTIATION_KEY_TAG, type_arguments, single_signature) {
+            return key;
+        }
+    }
+    get_type_instantiation_key_hashed(type_arguments, alias, single_signature)
+}
+
+#[inline(never)]
+fn get_type_instantiation_key_hashed(type_arguments: &[P<Type>], alias: AliasArg<'_>, single_signature: bool) -> CacheHashKey {
     let mut b = keyBuilder::default();
     b.write_types(type_arguments);
     b.write_alias_arg(alias);
@@ -684,7 +718,18 @@ pub(crate) fn get_template_type_key(texts: &[&str], types: &[P<Type>]) -> CacheH
 }
 
 // checker.go:17943
+#[inline]
 pub(crate) fn get_conditional_type_key(type_arguments: &[P<Type>], alias: Option<P<TypeAlias>>, for_constraint: bool) -> CacheHashKey {
+    if alias.is_none() {
+        if let Some(key) = packed_type_list_key(PACKED_CONDITIONAL_KEY_TAG, type_arguments, for_constraint) {
+            return key;
+        }
+    }
+    get_conditional_type_key_hashed(type_arguments, alias, for_constraint)
+}
+
+#[inline(never)]
+fn get_conditional_type_key_hashed(type_arguments: &[P<Type>], alias: Option<P<TypeAlias>>, for_constraint: bool) -> CacheHashKey {
     let mut b = keyBuilder::default();
     b.write_types(type_arguments);
     b.write_alias(alias);
@@ -2441,8 +2486,23 @@ impl Checker {
     }
 
     // Go's getSignaturesOfStructuredType returns the stored slice; this is it without the copy.
+    /// A type with resolved members has no lazy member table, so the resolved signatures are the answer (a mapped
+    /// type's early return aside); that path makes no call and saves no registers.
     #[cfg_attr(feature = "site-counts", track_caller)]
     pub(crate) fn signatures_of_structured_type(&mut self, t: P<Type>, kind: SignatureKind) -> &'static [P<Signature>] {
+        if t.flags().intersects(TypeFlags::StructuredType)
+            && t.object_flags_lazy().intersects(ObjectFlags::MembersResolved)
+            && !(self.lazy_members && t.object_flags().intersects(ObjectFlags::Mapped))
+        {
+            let resolved = t.as_structured_type();
+            return if kind == SignatureKind::Call { resolved.call_signatures() } else { resolved.construct_signatures() };
+        }
+        self.signatures_of_unresolved_structured_type(t, kind)
+    }
+
+    #[cfg_attr(feature = "site-counts", track_caller)]
+    #[inline(never)]
+    fn signatures_of_unresolved_structured_type(&mut self, t: P<Type>, kind: SignatureKind) -> &'static [P<Signature>] {
         if !t.flags().intersects(TypeFlags::StructuredType) {
             return &[];
         }
@@ -2480,7 +2540,16 @@ impl Checker {
     }
 
     // Go's getIndexInfosOfStructuredType returns the stored slice; this is it without the copy.
+    /// As `signatures_of_structured_type`: resolved members answer without a call.
     pub(crate) fn index_infos_of_structured_type(&mut self, t: P<Type>) -> &'static [P<IndexInfo>] {
+        if t.flags().intersects(TypeFlags::StructuredType) && t.object_flags_lazy().intersects(ObjectFlags::MembersResolved) {
+            return t.as_structured_type().index_infos();
+        }
+        self.index_infos_of_unresolved_structured_type(t)
+    }
+
+    #[inline(never)]
+    fn index_infos_of_unresolved_structured_type(&mut self, t: P<Type>) -> &'static [P<IndexInfo>] {
         if t.flags().intersects(TypeFlags::StructuredType) {
             if let Some(lm) = self.get_ready_lazy_member_table(t) {
                 self.lazy_member_stats.member_index_info_queries += 1;
@@ -2859,6 +2928,22 @@ pub(crate) struct LazyMembers {
     pub(crate) base_types: ThinSlice<P<Type>>,
 }
 
+/// What `lazy_unaffected_members` keeps per generic target: the declared-member table it describes, the sorted
+/// names answered true for good, and the named members whose answers may still change.
+pub(crate) struct LazyUnaffected {
+    table: P<SymbolTable>,
+    len: usize,
+    maps_this_only: bool,
+    named: u64,
+    settled: &'static [&'static str],
+    pending: Vec<(&'static str, P<Symbol>)>,
+}
+
+fn lazy_unaffected_shadow() -> bool {
+    static SHADOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SHADOW.get_or_init(|| std::env::var("TSRS_LAZY_UNAFFECTED").as_deref() == Ok("shadow"))
+}
+
 pub(crate) fn may_have_lazy_members(t: P<Type>) -> bool {
     t.object_flags_lazy() & (ObjectFlags::MembersResolved | ObjectFlags::Reference) == ObjectFlags::Reference
 }
@@ -2890,9 +2975,11 @@ impl Checker {
     }
 
     pub(crate) fn get_ready_lazy_member_table_worker(&mut self, t: P<Type>) -> Option<P<LazyMemberTable>> {
-        let source = t.target();
-        if !t.flags().intersects(TypeFlags::Object)
-            || source.is_none()
+        if !t.flags().intersects(TypeFlags::Object) {
+            return None;
+        }
+        let source = t.object_target();
+        if source.is_none()
             || source == Some(t)
             || !source.unwrap().object_flags().intersects(ObjectFlags::ClassOrInterface)
                 && !(self.lazy_tuples && source.unwrap().object_flags().intersects(ObjectFlags::Tuple))
@@ -2946,30 +3033,104 @@ impl Checker {
         });
         self.lazy_member_tables.insert(t, lm);
         self.lazy_member_stats.member_tables_created += 1;
-        if t.target().unwrap().object_flags().intersects(ObjectFlags::Tuple) {
+        if t.object_target().unwrap().object_flags().intersects(ObjectFlags::Tuple) {
             self.lazy_member_stats.tuple_tables_created += 1;
         }
         self.prepare_lazy_members(t, lm, type_arguments.last().copied());
         Some(lm)
     }
 
-    // Mirrors resolveObjectTypeMembers without creating member symbols.
-    pub(crate) fn prepare_lazy_members(&mut self, t: P<Type>, lm: P<LazyMemberTable>, this_argument: Option<P<Type>>) {
-        let source = t.target().unwrap();
-        let resolved = self.resolve_declared_members(source).unwrap();
-        // Whether instantiateSymbol returns a member itself depends on what is resolved now.
-        let mut unaffected: Vec<&'static str> = Vec::new();
-        if let Some(declared_members) = resolved.declared_members.get() {
-            for (id, symbol) in declared_members.entries() {
-                if self.is_named_member(symbol, id) {
-                    self.lazy_member_stats.member_table_declared_members += 1;
-                    if self.is_symbol_unaffected_by_instantiation(symbol, Some(lm.mapper)) {
-                        unaffected.push(id);
+    /// The sorted names of the named members in `declared_members` (the declared members of `source`) that
+    /// `instantiateSymbol` with `mapper` returns unchanged now (`isSymbolUnaffectedByInstantiation`).
+    ///
+    /// Reuse: an answer settles once the member's type (and a setter's write type) is resolved. The links set those
+    /// once, the type-variable test of a type never changes, and `maps_this_only` of a lazy table's mapper depends
+    /// only on the target's type parameters (it is checked anyway). So each target keeps the names answered true
+    /// for good and the members whose types were not resolved yet, and asks again only about those; members
+    /// answered false for good are dropped. `TSRS_LAZY_UNAFFECTED=shadow` recomputes every list and panics on a
+    /// difference.
+    fn lazy_unaffected_members(&mut self, source: P<Type>, declared_members: P<SymbolTable>, mapper: P<TypeMapper>) -> &'static [&'static str] {
+        let maps_this_only = mapper.maps_this_only();
+        let memo = self.lazy_unaffected.get_mut(&source).filter(|memo| memo.table == declared_members && memo.len == declared_members.len() && memo.maps_this_only == maps_this_only);
+        let result = match memo {
+            Some(memo) => {
+                self.lazy_member_stats.member_table_declared_members += memo.named;
+                if memo.pending.is_empty() {
+                    memo.settled
+                } else {
+                    let pending = std::mem::take(&mut memo.pending);
+                    let settled = memo.settled;
+                    let mut added: Vec<&'static str> = Vec::new();
+                    let mut still_pending = Vec::new();
+                    for (name, symbol) in pending {
+                        match self.settled_unaffected(symbol, mapper) {
+                            Some(true) => added.push(name),
+                            Some(false) => {}
+                            None => still_pending.push((name, symbol)),
+                        }
                     }
+                    let memo = self.lazy_unaffected.get_mut(&source).unwrap();
+                    memo.pending = still_pending;
+                    if !added.is_empty() {
+                        added.extend_from_slice(settled);
+                        added.sort_unstable();
+                        memo.settled = alloc_vec(added);
+                    }
+                    memo.settled
                 }
             }
+            None => {
+                let mut settled: Vec<&'static str> = Vec::new();
+                let mut pending = Vec::new();
+                let mut named = 0;
+                for (name, symbol) in declared_members.entries() {
+                    if self.is_named_member(symbol, name) {
+                        named += 1;
+                        match self.settled_unaffected(symbol, mapper) {
+                            Some(true) => settled.push(name),
+                            Some(false) => {}
+                            None => pending.push((name, symbol)),
+                        }
+                    }
+                }
+                self.lazy_member_stats.member_table_declared_members += named;
+                settled.sort_unstable();
+                let settled = alloc_vec(settled);
+                self.lazy_unaffected.insert(source, LazyUnaffected { table: declared_members, len: declared_members.len(), maps_this_only, named, settled, pending });
+                settled
+            }
+        };
+        if lazy_unaffected_shadow() {
+            let mut fresh: Vec<&'static str> = Vec::new();
+            for (name, symbol) in declared_members.entries() {
+                if self.is_named_member(symbol, name) && self.is_symbol_unaffected_by_instantiation(symbol, Some(mapper)) {
+                    fresh.push(name);
+                }
+            }
+            fresh.sort_unstable();
+            assert!(fresh == result, "TSRS_LAZY_UNAFFECTED=shadow: target {}: reused {:?}, fresh {:?}", source.id.0, result, fresh);
         }
-        unaffected.sort_unstable();
+        result
+    }
+
+    /// `is_symbol_unaffected_by_instantiation(symbol, mapper)` if that answer cannot change any more (see
+    /// `lazy_unaffected_members`), else `None`.
+    fn settled_unaffected(&mut self, symbol: P<Symbol>, mapper: P<TypeMapper>) -> Option<bool> {
+        if self.is_symbol_unaffected_by_instantiation(symbol, Some(mapper)) {
+            return Some(true);
+        }
+        let links = self.value_symbol_links.get(symbol);
+        (links.resolved_type.get().is_some() && (!symbol.flags().intersects(SymbolFlags::SetAccessor) || links.write_type().is_some())).then_some(false)
+    }
+
+    // Mirrors resolveObjectTypeMembers without creating member symbols.
+    pub(crate) fn prepare_lazy_members(&mut self, t: P<Type>, lm: P<LazyMemberTable>, this_argument: Option<P<Type>>) {
+        let source = t.object_target().unwrap();
+        let resolved = self.resolve_declared_members(source).unwrap();
+        let unaffected = match resolved.declared_members.get() {
+            Some(declared_members) => self.lazy_unaffected_members(source, declared_members, lm.mapper),
+            None => &[],
+        };
         let mut call_signatures = self.instantiate_signatures(resolved.declared_call_signatures.get(), lm.mapper);
         let mut construct_signatures = self.instantiate_signatures(resolved.declared_construct_signatures.get(), lm.mapper);
         let mut index_infos = self.instantiate_index_infos(resolved.declared_index_infos.get(), lm.mapper);
@@ -2988,7 +3149,7 @@ impl Checker {
             self.append_inherited_signatures_and_index_infos(&mut call_signatures, &mut construct_signatures, &mut index_infos, instantiated_base_type);
         }
         let _ = lm.ready.set(LazyMembers {
-            unaffected: ThinSlice::new(alloc_vec(unaffected)),
+            unaffected: ThinSlice::new(unaffected),
             call_signatures: ThinSlice::new(alloc_vec(call_signatures)),
             construct_signatures: ThinSlice::new(alloc_vec(construct_signatures)),
             index_infos: ThinSlice::new(alloc_vec(index_infos)),
@@ -3091,7 +3252,7 @@ impl Checker {
         self.lazy_member_stats.member_lookups += 1;
         // The declared member, else the first base type's property (see addInheritedMembers).
         let mut result: Option<P<Symbol>> = None;
-        let declared_members = self.resolve_declared_members(t.target().unwrap()).unwrap().declared_members.get();
+        let declared_members = self.resolve_declared_members(t.object_target().unwrap()).unwrap().declared_members.get();
         if let Some((name, decl)) = declared_members.and_then(|m| m.lookup_entry(name)) {
             if self.is_named_member(decl, name) {
                 if instantiate {
@@ -3119,8 +3280,13 @@ impl Checker {
     pub(crate) fn every_property_of_structured_type(&mut self, t: P<Type>, f: &mut dyn FnMut(&mut Checker, P<Symbol>) -> bool) -> bool {
         if let Some(lm) = self.get_ready_lazy_member_table(t) {
             self.lazy_member_stats.member_every_property_queries += 1;
-            let mut seen: FxHashSet<&'static str> = FxHashSet::default();
-            return self.every_lazy_property(t, lm, &mut seen, f);
+            let mut seen = self.free_name_sets.pop().unwrap_or_default();
+            let result = self.every_lazy_property(t, lm, &mut seen, f);
+            if seen.capacity() <= 1024 {
+                seen.clear();
+                self.free_name_sets.push(seen);
+            }
+            return result;
         }
         let properties = self.resolve_structured_type_members(t).unwrap().properties();
         properties.iter().all(|&p| f(self, p))
