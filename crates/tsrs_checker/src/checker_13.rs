@@ -432,6 +432,11 @@ impl Checker {
         let length = types.len() as i64;
         let mut i = types.len();
         let mut count: i64 = 0;
+        // tsrs: the type of the key property of each target, for the key property name of the last source that had
+        // one: the sources of a discriminated union share the name, and without this each target's property is looked
+        // up again for every source. Dropped when the name changes or any type's members are reset.
+        let mut key_types: FxHashMap<P<Type>, Option<P<Type>>> = FxHashMap::default();
+        let mut key_types_of: Option<(&'static str, u32)> = None;
         while i > 0 {
             i -= 1;
             let source = types[i];
@@ -490,7 +495,19 @@ impl Checker {
                         count += 1;
                         if let Some(key_property) = key_property {
                             if target.flags().intersects(TypeFlags::Object | TypeFlags::Intersection | TypeFlags::InstantiableNonPrimitive) {
-                                let t = self.get_type_of_property_of_type(target, key_property.name());
+                                let of = Some((key_property.name(), self.members_reset_epoch));
+                                if key_types_of != of {
+                                    key_types.clear();
+                                    key_types_of = of;
+                                }
+                                let t = match key_types.get(&target) {
+                                    Some(&t) => t,
+                                    None => {
+                                        let t = self.get_type_of_property_of_type(target, key_property.name());
+                                        key_types.insert(target, t);
+                                        t
+                                    }
+                                };
                                 if let Some(t) = t {
                                     if is_unit_type(t) && Some(self.get_regular_type_of_literal_type(t)) != key_property_type {
                                         continue;
@@ -2639,7 +2656,28 @@ impl Checker {
         if NOT_IN_PRIMITIVE_UNION.contains(kind) && t.object_flags().intersects(ObjectFlags::PrimitiveUnion) {
             return false;
         }
+        if t.types().len() >= 8 {
+            return self.constituent_flags(t).intersects(kind);
+        }
         maybe_constituent_of_kind(t.types(), kind)
+    }
+
+    /// The flags of the constituents of the union or intersection `t`, nested unions' and intersections' included:
+    /// `maybe_type_of_kind` of a large union walks all of them for every kind asked, and they never change.
+    #[inline(never)]
+    fn constituent_flags(&mut self, t: P<Type>) -> TypeFlags {
+        if let Some(&flags) = self.constituent_flags.get(&t) {
+            return flags;
+        }
+        let mut flags = TypeFlags::None;
+        for &c in t.types() {
+            flags |= c.flags();
+            if c.flags().intersects(TypeFlags::UnionOrIntersection) {
+                flags |= self.constituent_flags(c);
+            }
+        }
+        self.constituent_flags.insert(t, flags);
+        flags
     }
 
     // checker.go:28090

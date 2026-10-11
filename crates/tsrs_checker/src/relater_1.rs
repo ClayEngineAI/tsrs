@@ -1135,7 +1135,8 @@ impl Checker {
 }
 
 // relater.go:797
-#[inline]
+#[expect(clippy::inline_always, reason = "measured: plain #[inline] lets it be outlined (notes/perf-icount-hillclimb.md, round 3)")]
+#[inline(always)]
 pub(crate) fn has_matching_recursion_identity(c: &mut Checker, t: P<Type>, identity: RecursionId) -> bool {
     let target = get_recursion_identity_target(c, t);
     if target.flags().intersects(TypeFlags::Intersection) {
@@ -1147,12 +1148,27 @@ pub(crate) fn has_matching_recursion_identity(c: &mut Checker, t: P<Type>, ident
 /// `has_matching_recursion_identity` of an intersection recursion identity target.
 #[inline(never)]
 fn intersection_has_matching_recursion_identity(c: &mut Checker, target: P<Type>, identity: RecursionId) -> bool {
+    // tsrs: the identities of the constituents (nested intersections' included) are kept per intersection: the
+    // deeply-nested test asks this of every intersection on the relater's stack each time, and they never change.
+    if let Some(ids) = c.intersection_recursion_ids.get(&target) {
+        return ids.contains(&identity);
+    }
+    let mut ids = Vec::new();
+    collect_intersection_recursion_ids(c, target, &mut ids);
+    let found = ids.contains(&identity);
+    c.intersection_recursion_ids.insert(target, ids.into_boxed_slice());
+    found
+}
+
+fn collect_intersection_recursion_ids(c: &mut Checker, target: P<Type>, ids: &mut Vec<RecursionId>) {
     for &t in target.types() {
-        if has_matching_recursion_identity(c, t, identity) {
-            return true;
+        let t = get_recursion_identity_target(c, t);
+        if t.flags().intersects(TypeFlags::Intersection) {
+            collect_intersection_recursion_ids(c, t, ids);
+        } else {
+            ids.push(get_recursion_identity_from_target(t));
         }
     }
-    false
 }
 
 // relater.go:810
@@ -1200,6 +1216,10 @@ fn get_recursion_identity_target_worker(c: &mut Checker, t: P<Type>) -> P<Type> 
 // instantiations of that type have the same recursion identity. The default recursion identity is the object
 // identity of the type, meaning that every type is unique. Generally, types with constituents that could circularly
 // reference the type have a recursion identity that differs from the object identity.
+// tsrs: inline, it is asked of every type on the relater's stack (and of each constituent of an intersection there)
+// for each deeply-nested test, 474M times on the 38k-file codebase.
+#[expect(clippy::inline_always, reason = "measured: #[inline] is ignored here (notes/perf-icount-hillclimb.md, round 3)")]
+#[inline(always)]
 pub(crate) fn get_recursion_identity_from_target(t: P<Type>) -> RecursionId {
     // Object and array literals are known not to contain recursive references and don't need a recursion identity.
     if t.flags().intersects(TypeFlags::Object) && !is_object_or_array_literal_type(t) {
@@ -1397,21 +1417,21 @@ impl Checker {
         };
         // Only full lookups are worth recording (has_property_of_type does not instantiate).
         let mut found = found.filter(|_| !lazy && !self.lazy_has_prop);
+        let resolved_source = self.resolved_property_source(source);
         for &target_prop in properties.iter() {
+            // tsrs: the flag test first, the declaration-reading test only for a property that is looked up (both
+            // only skip it).
             // TODO: remove this when we support static private identifier fields and find other solutions to get privateNamesAndStaticFields test to pass
-            if is_static_private_identifier_property(target_prop) {
-                if let Some(found) = found.as_deref_mut() {
-                    found.push(None);
-                }
-                continue;
-            }
-            if require_optional_properties
+            if (require_optional_properties
                 || !target_prop.flags().intersects(SymbolFlags::Optional)
-                    && !target_prop.check_flags.get().intersects(CheckFlags::Partial)
+                    && !target_prop.check_flags.get().intersects(CheckFlags::Partial))
+                && !is_static_private_identifier_property(target_prop)
             {
                 let source_prop = if (lazy || self.lazy_has_prop) && !match_discriminant_properties {
                     // notes/mem-lazy.md L9/L10: only whether the source has the property matters below.
                     if self.has_property_of_type(source, target_prop.name()) { Some(target_prop) } else { None }
+                } else if let Some(resolved_source) = &resolved_source {
+                    self.get_resolved_property(resolved_source, target_prop.name())
                 } else {
                     self.get_property_of_type(source, target_prop.name())
                 };
