@@ -1,6 +1,6 @@
 # Builds the tsrs binaries and the WebAssembly module and publishes the npm packages (npm/README.md), all at the
 # version npm/build.mjs derives from Cargo.toml. The conformance and fourslash gates run here on the BOLT-optimized
-# Linux binaries (.github/scripts/bolt.sh). The macOS binary gets only the smoke tests below; nothing runs the suites
+# GNU binaries (.github/scripts/bolt.sh). The macOS binary gets only the smoke tests below; nothing runs the suites
 # on macOS (.depot/workflows/ci.yml, Linux only, gates the source). The WebAssembly differential gate
 # (tools/wasm/gate.sh) runs only in ci.yml.
 #
@@ -211,6 +211,39 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --workspace --locked
 
+  # Musl uses static dist builds without PGO/BOLT.
+  build-musl:
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oxc-project/setup-rust@3d6fb132fbe7cdcb66bf8ec193911c2945369d12 # v1.0.17
+        with:
+          restore-cache: false
+          tools: cargo-zigbuild@0.23.4
+      - uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2.2.1
+        with:
+          version: 0.13.0
+      - name: Build and stage musl binary
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo zigbuild --profile dist --locked -p tsrs_cli --target ${{ matrix.target }}
+          mkdir -p "out/${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/dist/tsrs" "out/${{ matrix.target }}/tsrs"
+          "out/${{ matrix.target }}/tsrs" --version
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+
   # `@ts-rs/wasm` (npm/tsrs-wasm, notes/wasm-build.md): the module as ci.yml's wasm job builds it, the
   # package's tests (they compare against a native release build), the package packed by npm/build.mjs, and that
   # tarball installed and run before it is handed to the publish job.
@@ -278,7 +311,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [version, check, build, wasm]
+    needs: [version, check, build, build-musl, wasm]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
@@ -308,7 +341,8 @@ jobs:
           path: wasm-dist
       - name: Require the release platforms and the WebAssembly package
         run: |
-          for t in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+          for t in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             test -f "artifacts/$t/tsrs" || { echo "::error::missing binary for $t"; exit 1; }
           done
           ls -lR artifacts wasm-dist
