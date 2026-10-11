@@ -10,9 +10,9 @@ and [all recorded runs](results/) for other thread counts and instruction counts
 
 Time and peak memory to type-check each project (`-p <project> --noEmit`) on Depot CI `depot-ubuntu-24.04-16` (16 vCPU, 63 GB RAM, Linux x86_64, AMD EPYC 9R45 96-Core Processor). Median of 10 interleaved runs (3 for tsgo).
 
-- **tsrs**: commit `4b6b6699bd3e`, PGO-optimized `dist` build, built like the npm release binaries.
+- **tsrs**: commit `fa529e47e5ed`, PGO-optimized `dist` build, built like the npm release binaries.
 - **tsgo**: npm `typescript@7.0.2`, the official Go compiler. tsrs ports a later 7.1-dev commit (`b85298b6`).
-- **bun check**: Bun 1.4.4-canary.1+6c1eb067e.
+- **bun check**: Bun 1.4.4-canary.1+7c96a1212.
 
 Projects: vscode, xstate-main, webpack, mui-docs, Compiler, Compiler-Unions are from [microsoft/typescript-benchmarking](https://github.com/microsoft/typescript-benchmarking), the suite the TypeScript team benchmarks tsgo on; the other 11 are large open-source applications.
 
@@ -24,51 +24,51 @@ No thread flags: tsgo runs 4 checker threads; tsrs runs 16 (its default: all cor
 
 | project | tsgo | tsrs | bun check | tsrs vs tsgo | tsrs vs bun |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| mui-docs | 12.06 s | 0.74 s | 7.36 s | **16.21x faster** | 9.89x faster |
-| next-packages-next | 2.83 s | 0.20 s | 0.38 s | **14.04x faster** | 1.88x faster |
-| mikro-orm | 10.10 s | 0.73 s | 1.84 s | **13.84x faster** | 2.52x faster |
-| vscode | 10.52 s | 0.81 s | 1.55 s | **12.98x faster** | 1.91x faster |
-| storybook | 1.58 s | 0.14 s | 0.27 s | **11.43x faster** | 1.97x faster |
-| formbricks-web | 6.89 s | 0.62 s | 1.02 s | **11.11x faster** | 1.64x faster |
-| supabase-studio | 6.60 s | 0.61 s | 1.61 s | **10.79x faster** | 2.63x faster |
-| t3code-server | 13.18 s | 1.33 s | 2.69 s | **9.89x faster** | 2.02x faster |
-| webpack | 1.29 s | 0.13 s | 0.30 s | **9.63x faster** | 2.22x faster |
-| drizzle-orm | 1.73 s | 0.18 s | 0.41 s | **9.38x faster** | 2.21x faster |
-| next-root | 1.53 s | 0.17 s | 0.29 s | **9.16x faster** | 1.73x faster |
-| cal-diy | 5.44 s | 0.60 s | 1.50 s | **9.06x faster** | 2.49x faster |
-| playwright | 1.10 s | 0.12 s | 0.22 s | **8.96x faster** | 1.83x faster |
-| nuxt | 1.27 s | 0.16 s | 0.43 s | **7.96x faster** | 2.68x faster |
-| xstate-main | 0.82 s | 0.11 s | 0.15 s | **7.30x faster** | 1.38x faster |
-| Compiler-Unions | 0.51 s | 0.09 s | 0.20 s | **5.52x faster** | 2.16x faster |
-| Compiler | 0.27 s | 0.06 s | 0.11 s | 4.29x faster | 1.76x faster |
+| mui-docs | 12.29 s | 0.73 s | 7.37 s | **16.74x faster** | 10.04x faster |
+| next-packages-next | 2.85 s | 0.19 s | 0.37 s | **14.90x faster** | 1.91x faster |
+| mikro-orm | 10.64 s | 0.72 s | 1.83 s | **14.70x faster** | 2.54x faster |
+| vscode | 11.07 s | 0.85 s | 1.63 s | **13.08x faster** | 1.92x faster |
+| storybook | 1.56 s | 0.13 s | 0.27 s | **11.77x faster** | 2.02x faster |
+| supabase-studio | 6.59 s | 0.59 s | 1.57 s | **11.07x faster** | 2.64x faster |
+| formbricks-web | 6.80 s | 0.62 s | 1.01 s | **10.95x faster** | 1.63x faster |
+| t3code-server | 12.99 s | 1.29 s | 2.64 s | **10.05x faster** | 2.04x faster |
+| webpack | 1.27 s | 0.13 s | 0.28 s | **9.79x faster** | 2.12x faster |
+| playwright | 1.11 s | 0.12 s | 0.22 s | **9.33x faster** | 1.84x faster |
+| next-root | 1.50 s | 0.16 s | 0.28 s | **9.29x faster** | 1.74x faster |
+| drizzle-orm | 1.81 s | 0.20 s | 0.43 s | **9.28x faster** | 2.21x faster |
+| cal-diy | 5.35 s | 0.58 s | 1.45 s | **9.16x faster** | 2.48x faster |
+| nuxt | 1.21 s | 0.16 s | 0.42 s | **7.76x faster** | 2.72x faster |
+| xstate-main | 0.81 s | 0.11 s | 0.15 s | **7.12x faster** | 1.37x faster |
+| Compiler-Unions | 0.51 s | 0.09 s | 0.20 s | **5.58x faster** | 2.17x faster |
+| Compiler | 0.27 s | 0.06 s | 0.11 s | 4.27x faster | 1.76x faster |
 
 **Peak memory**
 
 | project | tsgo | tsrs | bun check | tsrs vs tsgo | tsrs vs bun |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| mui-docs | 7.51 GiB | 1.59 GiB | 11.61 GiB | **4.71x less** | 7.28x less |
-| next-packages-next | 1.77 GiB | 694 MiB | 748 MiB | 2.61x less | 1.08x less |
-| mikro-orm | 6.44 GiB | 1.98 GiB | 1.41 GiB | 3.25x less | 1.40x more |
-| vscode | 7.49 GiB | 2.09 GiB | 1.86 GiB | 3.58x less | 1.12x more |
-| storybook | 1.40 GiB | 521 MiB | 606 MiB | 2.75x less | 1.16x less |
-| formbricks-web | 5.85 GiB | 1.99 GiB | 1.62 GiB | 2.94x less | 1.23x more |
-| supabase-studio | 4.42 GiB | 1.69 GiB | 1.21 GiB | 2.62x less | 1.39x more |
-| t3code-server | 6.18 GiB | 2.12 GiB | 1.12 GiB | 2.91x less | 1.90x more |
-| webpack | 1.15 GiB | 538 MiB | 497 MiB | 2.20x less | 1.08x more |
-| drizzle-orm | 1.70 GiB | 819 MiB | 735 MiB | 2.13x less | 1.11x more |
-| next-root | 1.30 GiB | 483 MiB | 568 MiB | 2.75x less | 1.18x less |
-| cal-diy | 4.40 GiB | 1.87 GiB | 1.30 GiB | 2.35x less | 1.44x more |
-| playwright | 1.05 GiB | 494 MiB | 476 MiB | 2.17x less | 1.04x more |
-| nuxt | 1.12 GiB | 519 MiB | 544 MiB | 2.22x less | 1.05x less |
-| xstate-main | 735 MiB | 278 MiB | 393 MiB | 2.65x less | 1.41x less |
-| Compiler-Unions | 240 MiB | 101 MiB | 229 MiB | 2.38x less | 2.27x less |
-| Compiler | 218 MiB | 97 MiB | 218 MiB | 2.25x less | 2.25x less |
+| mui-docs | 7.62 GiB | 1.60 GiB | 11.66 GiB | **4.77x less** | 7.30x less |
+| next-packages-next | 1.77 GiB | 694 MiB | 750 MiB | 2.61x less | 1.08x less |
+| mikro-orm | 7.00 GiB | 1.97 GiB | 1.41 GiB | 3.56x less | 1.40x more |
+| vscode | 7.73 GiB | 2.09 GiB | 1.87 GiB | 3.70x less | 1.12x more |
+| storybook | 1.37 GiB | 523 MiB | 606 MiB | 2.68x less | 1.16x less |
+| supabase-studio | 4.86 GiB | 1.69 GiB | 1.22 GiB | 2.87x less | 1.39x more |
+| formbricks-web | 5.48 GiB | 1.99 GiB | 1.62 GiB | 2.76x less | 1.23x more |
+| t3code-server | 6.15 GiB | 2.10 GiB | 1.11 GiB | 2.92x less | 1.89x more |
+| webpack | 1.16 GiB | 536 MiB | 498 MiB | 2.22x less | 1.07x more |
+| playwright | 1.06 GiB | 496 MiB | 477 MiB | 2.20x less | 1.04x more |
+| next-root | 1.29 GiB | 485 MiB | 568 MiB | 2.72x less | 1.17x less |
+| drizzle-orm | 1.74 GiB | 816 MiB | 731 MiB | 2.19x less | 1.12x more |
+| cal-diy | 4.40 GiB | 1.88 GiB | 1.31 GiB | 2.34x less | 1.44x more |
+| nuxt | 1.17 GiB | 519 MiB | 543 MiB | 2.31x less | 1.05x less |
+| xstate-main | 742 MiB | 280 MiB | 394 MiB | 2.65x less | 1.41x less |
+| Compiler-Unions | 238 MiB | 99 MiB | 229 MiB | 2.41x less | 2.31x less |
+| Compiler | 217 MiB | 99 MiB | 219 MiB | 2.18x less | 2.21x less |
 
 **Errors.** tsgo and tsrs report the same errors on 9 of 17 projects. The other 8 differ only because TypeScript changed between 7.0.2 and the 7.1-dev commit tsrs ports: `typescript@7.1.0-dev.20260930.4`, built from that commit, reports exactly tsrs's errors (tsgo / tsrs): vscode 359 / 371, webpack 848 / 840, supabase-studio 0 / 9, t3code-server 5 / 6, next-packages-next 6 / 5, next-root 441 / 438, nuxt 3 / 4, drizzle-orm 10845 / 10846. bun check, which follows TypeScript 7.0 like tsgo, differs from tsgo on webpack (837 errors, tsgo 848).
 
 Rows are sorted by speedup over tsgo. Wall time is the process's wall clock; peak memory is its maximum resident set size. Bold marks a win over tsgo of at least 5x in time or 4x in memory.
 
-Shared CI machines vary by a few percent between runs of the same code; the single-threaded instruction counts in `bench/results/` are the exact measure. Date: 2026-10-11 16:25 UTC. tsrs commit: `4b6b6699bd3e`. Method: [benchmark methodology](https://github.com/maschwenk/tsrs/blob/main/bench/README.md).
+Shared CI machines vary by a few percent between runs of the same code; the single-threaded instruction counts in `bench/results/` are the exact measure. Date: 2026-10-11 21:00 UTC. tsrs commit: `fa529e47e5ed`. Method: [benchmark methodology](https://github.com/maschwenk/tsrs/blob/main/bench/README.md).
 <!-- bench:end -->
 
 ## Large-project chart snapshot
