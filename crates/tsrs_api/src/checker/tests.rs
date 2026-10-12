@@ -1166,3 +1166,28 @@ fn object_flags_leave_out_tsrs_memo_bits() {
     assert_eq!(after & !(u64::from(tsrs_checker::ObjectFlags::MembersResolved.bits())), before & !(u64::from(tsrs_checker::ObjectFlags::MembersResolved.bits())));
     assert_eq!(after >> 30, 0, "objectFlags {after:#x} has bits Go does not define");
 }
+
+/// A file in two projects, asked about through the one that isn't its default project: the auto-import
+/// retry prepares the default project, so the completion still needs auto imports. Go returns that
+/// error unwrapped (session.go handleGetCompletionsAtPosition), not as a client error.
+#[test]
+fn completions_needing_auto_imports_return_the_bare_error() {
+    let shared = "declare const g: num\n";
+    let h = TestHost::with_configs(
+        &[
+            ("/p/proj/tsconfig.json", r#"{ "compilerOptions": { "strict": true }, "include": ["*.ts", "../shared.d.ts"] }"#),
+            ("/p/proj/a.ts", "export const helperValue = 1;\n"),
+            ("/p/tsconfig.json", r#"{ "compilerOptions": { "strict": true }, "files": ["shared.d.ts"] }"#),
+            ("/p/shared.d.ts", shared),
+        ],
+        &["/p/proj/tsconfig.json", "/p/tsconfig.json"],
+    );
+    let at = utf16_pos(shared, "num") + 3;
+    let err = h.call("getCompletionsAtPosition", &h.sp(&format!(r#""file":"/p/shared.d.ts","position":{at}"#))).unwrap_err();
+    assert_eq!(err.to_string(), "completion list needs auto imports");
+    assert_eq!(err.kind, CheckerErrorKind::Internal);
+    for s in h.clones.lock().unwrap().drain(..) {
+        let underflow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.deref())).is_err();
+        assert!(underflow, "the auto-import snapshot was not released by the handler");
+    }
+}
